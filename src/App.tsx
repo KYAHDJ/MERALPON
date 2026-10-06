@@ -5,12 +5,18 @@ type Reading = { id: string; date: string; time: string; reading: number; notes:
 type ReadingWithUsage = Reading & { usage: number; cost: number };
 
 const RATE = 14.9061;
-const BASELINE = 8869;
 const GOAL = 250;
 const STORAGE_KEY = "meralco-kwh-readings-v1";
+const PERIOD_KEY = "meralco-kwh-billing-period-v1";
+const DEFAULT_PERIOD = { start: "2026-09-29", end: "2026-10-28" };
 const seed: Reading[] = [
-  { id: "baseline", date: "2026-09-29", time: "08:00", reading: BASELINE, notes: "Cycle baseline" },
-  { id: "sample", date: "2026-10-04", time: "08:15", reading: 8885, notes: "Latest meter check" },
+  { id: "baseline", date: "2026-09-29", time: "16:10", reading: 8869, notes: "Baseline (bill cut-off)" },
+  { id: "sep30", date: "2026-09-30", time: "18:11", reading: 8873, notes: "Meter photo" },
+  { id: "oct01", date: "2026-10-01", time: "22:44", reading: 8877, notes: "Meter photo" },
+  { id: "oct02", date: "2026-10-02", time: "16:04", reading: 8878, notes: "Meter photo" },
+  { id: "oct03", date: "2026-10-03", time: "16:32", reading: 8882, notes: "Meter photo" },
+  { id: "oct04", date: "2026-10-04", time: "16:09", reading: 8885, notes: "Meter photo" },
+  { id: "oct05", date: "2026-10-05", time: "22:20", reading: 8888, notes: "Meter photo" },
 ];
 
 const money = new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" });
@@ -50,9 +56,18 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 
 export default function App() {
   const [readings, setReadings] = useState<Reading[]>(() => {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") || seed; } catch { return seed; }
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") as Reading[] | null;
+      if (!saved || (saved.length === 2 && saved.some((item) => item.id === "sample"))) return seed;
+      return saved;
+    } catch { return seed; }
   });
-  const [modal, setModal] = useState<"add" | "edit" | "ocr" | null>(null);
+  const [periodConfigured, setPeriodConfigured] = useState(() => Boolean(localStorage.getItem(PERIOD_KEY)));
+  const [period, setPeriod] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(PERIOD_KEY) || "null") || DEFAULT_PERIOD; } catch { return DEFAULT_PERIOD; }
+  });
+  const [periodForm, setPeriodForm] = useState(period);
+  const [modal, setModal] = useState<"add" | "edit" | "ocr" | "period" | null>(() => periodConfigured ? null : "period");
   const [editing, setEditing] = useState<Reading | null>(null);
   const [form, setForm] = useState({ date: todayISO(), time: timeNow(), reading: "", notes: "" });
   const [dragging, setDragging] = useState(false);
@@ -64,22 +79,32 @@ export default function App() {
   const importRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(readings)), [readings]);
+  useEffect(() => { if (periodConfigured) localStorage.setItem(PERIOD_KEY, JSON.stringify(period)); }, [period, periodConfigured]);
   const computed = useMemo<ReadingWithUsage[]>(() => {
-    const sorted = [...readings].sort((a, b) => `${a.date}T${a.time}`.localeCompare(`${b.date}T${b.time}`));
+    const sorted = readings.filter((item) => item.date >= period.start && item.date <= period.end).sort((a, b) => `${a.date}T${a.time}`.localeCompare(`${b.date}T${b.time}`));
     return sorted.map((item, index) => ({ ...item, usage: index ? Math.max(0, item.reading - sorted[index - 1].reading) : 0, cost: index ? Math.max(0, item.reading - sorted[index - 1].reading) * RATE : 0 }));
-  }, [readings]);
+  }, [readings, period]);
   const latest = computed.at(-1) || { ...seed[0], usage: 0, cost: 0 };
   const previous = computed.at(-2);
-  const cycleUsage = Math.max(0, latest.reading - BASELINE);
+  const baselineReading = computed[0]?.reading ?? latest.reading;
+  const cycleUsage = Math.max(0, latest.reading - baselineReading);
   const cycleCost = cycleUsage * RATE;
   const recent = computed.filter((r) => r.usage > 0).slice(-7);
   const rollingAverage = recent.length ? recent.reduce((sum, r) => sum + r.usage, 0) / recent.length : 0;
   const latestDate = new Date(`${latest.date}T12:00:00`);
-  const daysInMonth = new Date(latestDate.getFullYear(), latestDate.getMonth() + 1, 0).getDate();
-  const remainingDays = Math.max(0, daysInMonth - latestDate.getDate());
+  const periodEndDate = new Date(`${period.end}T12:00:00`);
+  const remainingDays = Math.max(0, Math.ceil((periodEndDate.getTime() - latestDate.getTime()) / 86400000));
   const projectedCost = (cycleUsage + rollingAverage * remainingDays) * RATE;
   const change = previous?.usage ? ((latest.usage - previous.usage) / previous.usage) * 100 : 0;
   const progress = Math.min(100, (cycleUsage / GOAL) * 100);
+  const periodLabel = `${new Date(`${period.start}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric" })} – ${new Date(`${period.end}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}`;
+
+  const openPeriod = () => { setPeriodForm(period); setModal("period"); };
+  const savePeriod = (event: FormEvent) => {
+    event.preventDefault();
+    if (!periodForm.start || !periodForm.end || periodForm.end < periodForm.start) return;
+    setPeriod(periodForm); setPeriodConfigured(true); setModal(null);
+  };
 
   const openAdd = (reading = "") => { setEditing(null); setForm({ date: todayISO(), time: timeNow(), reading, notes: "" }); setModal("add"); };
   const openEdit = (item: Reading) => { setEditing(item); setForm({ date: item.date, time: item.time, reading: String(item.reading), notes: item.notes }); setModal("edit"); };
@@ -114,19 +139,20 @@ export default function App() {
   };
 
   return <main className="app-shell"><div className="grid-glow" /><div className="container">
-    <header className="topbar"><div className="brand"><span className="brand-mark"><Icon name="bolt" /></span><div><h1>Meralco kWh Tracker</h1><p>Cycle started September 29, 2026</p></div></div><div className="header-actions"><span className="rate-pill"><span /> Rate {money.format(RATE)}/kWh</span><button className="primary small" onClick={() => openAdd()}><Icon name="plus" /> Add reading</button></div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark"><Icon name="bolt" /></span><div><h1>Meralco kWh Tracker</h1><button className="period-link" onClick={openPeriod}>Billing period: {periodLabel}</button></div></div><div className="header-actions"><span className="rate-pill"><span /> Rate {money.format(RATE)}/kWh</span><button className="primary small" onClick={() => openAdd()}><Icon name="plus" /> Add reading</button></div></header>
     <section className="dashboard" aria-label="Current cycle summary">
       <article className="metric-card today-card"><div className="metric-icon cyan"><Icon name="chart" /></div><p className="kicker">Today's usage</p><h2>{number.format(latest.usage)} <small>kWh</small></h2><p className="metric-cost">{money.format(latest.cost)}</p><span className={`change ${change <= 0 ? "good" : "warn"}`}>{previous ? `${change > 0 ? "+" : ""}${change.toFixed(0)}% vs previous` : "First reading"}</span></article>
       <article className="gauge-card"><div className="gauge" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}><div className="gauge-core"><p>Current reading</p><h2>{latest.reading.toLocaleString("en-PH")} <small>kWh</small></h2><span>{progress.toFixed(0)}% of {GOAL} kWh goal</span></div></div><div className="cycle-stats"><div><span>Cycle consumption</span><strong>{number.format(cycleUsage)} kWh</strong></div><i /><div><span>Running cycle cost</span><strong>{money.format(cycleCost)}</strong></div></div></article>
-      <article className="metric-card estimate-card"><div className="metric-icon green"><Icon name="trend" /></div><p className="kicker">Tomorrow est.</p><h2>{number.format(rollingAverage)} <small>kWh</small></h2><p className="metric-cost">{money.format(rollingAverage * RATE)}</p><span className="projection">Month-end est. <b>{money.format(projectedCost)}</b></span></article>
+      <article className="metric-card estimate-card"><div className="metric-icon green"><Icon name="trend" /></div><p className="kicker">Tomorrow est.</p><h2>{number.format(rollingAverage)} <small>kWh</small></h2><p className="metric-cost">{money.format(rollingAverage * RATE)}</p><span className="projection">Period-end est. <b>{money.format(projectedCost)}</b></span></article>
     </section>
     <section className="work-grid"><article className="panel upload-panel"><div className="section-title"><div><p className="kicker">Quick capture</p><h2>Scan your meter</h2></div><span>OCR powered</span></div><input ref={fileRef} hidden type="file" accept="image/*" onChange={(e) => scan(e.target.files?.[0])} /><input ref={cameraRef} hidden type="file" accept="image/*" capture="environment" onChange={(e) => scan(e.target.files?.[0])} /><div className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragging(false); scan(e.dataTransfer.files[0]); }}><span className="camera"><Icon name="camera" /></span><strong>Capture your meter reading</strong><small>Take a new photo or use one from your gallery</small><div className="capture-actions"><button type="button" className="outline-button camera-button" onClick={() => cameraRef.current?.click()}><Icon name="camera" /> Take photo</button><button type="button" className="outline-button" onClick={() => fileRef.current?.click()}><Icon name="upload" /> Choose photo</button></div></div></article>
-      <aside className="panel insight-panel"><div className="section-title"><div><p className="kicker">7-day signal</p><h2>Usage outlook</h2></div></div><div className="insight-number"><span>Daily average</span><strong>{number.format(rollingAverage)} kWh</strong></div><div className="mini-bars" aria-hidden="true">{(recent.length ? recent : [{usage:0}]).map((r, i) => <span key={i} style={{ height: `${Math.max(10, Math.min(100, r.usage / Math.max(...recent.map(x => x.usage), 1) * 100))}%` }} />)}</div><p>At this pace, your projected month-end cycle cost is <b>{money.format(projectedCost)}</b>.</p></aside></section>
+      <aside className="panel insight-panel"><div className="section-title"><div><p className="kicker">7-day signal</p><h2>Usage outlook</h2></div></div><div className="insight-number"><span>Daily average</span><strong>{number.format(rollingAverage)} kWh</strong></div><div className="mini-bars" aria-hidden="true">{(recent.length ? recent : [{usage:0}]).map((r, i) => <span key={i} style={{ height: `${Math.max(10, Math.min(100, r.usage / Math.max(...recent.map(x => x.usage), 1) * 100))}%` }} />)}</div><p>At this pace, your projected billing-period cost is <b>{money.format(projectedCost)}</b>.</p></aside></section>
     <section className="panel ledger"><div className="ledger-head"><div><p className="kicker">Consumption history</p><h2>Meter readings</h2><p>{computed.length} entries saved on this device</p></div><div className="ledger-actions"><button onClick={() => importRef.current?.click()}>Import JSON</button><input ref={importRef} hidden type="file" accept="application/json,.json" onChange={(e) => importJSON(e.target.files?.[0])}/><button onClick={() => exportFile("json")}><Icon name="download" /> JSON</button><button onClick={() => exportFile("csv")}><Icon name="download" /> CSV</button></div></div><div className="table-wrap"><table><thead><tr><th>Date & time</th><th>Meter reading</th><th>Daily usage</th><th>Daily cost</th><th>Notes</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{[...computed].reverse().map((r) => <tr key={r.id}><td><strong>{new Date(`${r.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}</strong><span>{r.time}</span></td><td>{r.reading.toLocaleString("en-PH")} <small>kWh</small></td><td className="usage">{r.id === computed[0]?.id ? "—" : `+${number.format(r.usage)} kWh`}</td><td>{r.id === computed[0]?.id ? "—" : money.format(r.cost)}</td><td className="notes">{r.notes || "—"}</td><td><div className="row-actions"><button onClick={() => openEdit(r)} aria-label="Edit reading"><Icon name="edit" /></button><button disabled={readings.length === 1} onClick={() => confirm("Delete this reading?") && setReadings((list) => list.filter((x) => x.id !== r.id))} aria-label="Delete reading"><Icon name="trash" /></button></div></td></tr>)}</tbody></table></div></section>
     <footer>Calculated at {money.format(RATE)} per kWh · Data stays in your browser</footer>
   </div>
   {(modal === "add" || modal === "edit") && <Modal title={modal === "edit" ? "Edit reading" : "Add a reading"} onClose={() => setModal(null)}><ReadingForm form={form} setForm={setForm} submit={submit} label={modal === "edit" ? "Save changes" : "Add to log"} /></Modal>}
   {modal === "ocr" && <Modal title="Verify scanned reading" onClose={() => setModal(null)}><div className="scan-preview">{preview && <img src={preview} alt="Uploaded meter" />}<div className="scan-status"><span style={{ width: `${ocrProgress * 100}%` }} /></div><p>{ocrStatus}</p></div><ReadingForm form={form} setForm={setForm} submit={submit} label="Confirm & save" /></Modal>}
+  {modal === "period" && <Modal title={periodConfigured ? "Edit billing period" : "Set your billing period"} onClose={() => periodConfigured && setModal(null)}><form className="reading-form" onSubmit={savePeriod}><p className="period-help">Both dates are required. Only readings inside this range are included in cycle usage, costs, and projections.</p><div className="field-row"><div className="field"><label htmlFor="period-start">Start date</label><input id="period-start" type="date" required value={periodForm.start} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, start: e.target.value }))}/></div><div className="field"><label htmlFor="period-end">End date</label><input id="period-end" type="date" required min={periodForm.start} value={periodForm.end} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, end: e.target.value }))}/></div></div><button className="primary modal-submit" type="submit">Save billing period</button></form></Modal>}
   </main>;
 }
 

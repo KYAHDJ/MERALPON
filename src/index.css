@@ -5,3 +5,4 @@
 @media(max-width:400px){.dashboard{grid-template-columns:1fr}.gauge-card{grid-column:auto}.metric-card{min-height:auto}.metric-cost{margin-bottom:15px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;transition-duration:.01ms!important}}
 .capture-actions{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:9px}.capture-actions .outline-button{padding:9px 13px}.capture-actions .outline-button:hover{border-color:rgba(255,255,255,.18);color:#e2e8ef}.capture-actions .camera-button{border-color:rgba(0,214,255,.28);color:#05151b;background:#08d5fb}.capture-actions .camera-button:hover{background:#2adeff}
+.period-link{display:block;margin:4px 0 0;border:0;padding:0;color:#687587;background:transparent;font-size:11px;font-weight:700;letter-spacing:.06em;text-align:left;text-transform:uppercase}.period-link:hover{color:#00d6ff}.period-help{margin:-4px 0 2px;color:#7c899b;font-size:13px;line-height:1.6}
