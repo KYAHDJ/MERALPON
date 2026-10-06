@@ -67,7 +67,12 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem(PERIOD_KEY) || "null") || DEFAULT_PERIOD; } catch { return DEFAULT_PERIOD; }
   });
   const [periodForm, setPeriodForm] = useState(period);
-  const [modal, setModal] = useState<"add" | "edit" | "ocr" | "period" | null>(() => periodConfigured ? null : "period");
+  const [modal, setModal] = useState<"add" | "edit" | "ocr" | "period" | null>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(PERIOD_KEY) || "null");
+      return !saved || todayISO() > saved.end ? "period" : null;
+    } catch { return "period"; }
+  });
   const [editing, setEditing] = useState<Reading | null>(null);
   const [form, setForm] = useState({ date: todayISO(), time: timeNow(), reading: "", notes: "" });
   const [dragging, setDragging] = useState(false);
@@ -97,6 +102,7 @@ export default function App() {
   const projectedCost = (cycleUsage + rollingAverage * remainingDays) * RATE;
   const change = previous?.usage ? ((latest.usage - previous.usage) / previous.usage) * 100 : 0;
   const progress = Math.min(100, (cycleUsage / GOAL) * 100);
+  const periodExpired = todayISO() > period.end;
   const periodLabel = `${new Date(`${period.start}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric" })} – ${new Date(`${period.end}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}`;
 
   const openPeriod = () => { setPeriodForm(period); setModal("period"); };
@@ -152,7 +158,7 @@ export default function App() {
   </div>
   {(modal === "add" || modal === "edit") && <Modal title={modal === "edit" ? "Edit reading" : "Add a reading"} onClose={() => setModal(null)}><ReadingForm form={form} setForm={setForm} submit={submit} label={modal === "edit" ? "Save changes" : "Add to log"} /></Modal>}
   {modal === "ocr" && <Modal title="Verify scanned reading" onClose={() => setModal(null)}><div className="scan-preview">{preview && <img src={preview} alt="Uploaded meter" />}<div className="scan-status"><span style={{ width: `${ocrProgress * 100}%` }} /></div><p>{ocrStatus}</p></div><ReadingForm form={form} setForm={setForm} submit={submit} label="Confirm & save" /></Modal>}
-  {modal === "period" && <Modal title={periodConfigured ? "Edit billing period" : "Set your billing period"} onClose={() => periodConfigured && setModal(null)}><form className="reading-form" onSubmit={savePeriod}><p className="period-help">Both dates are required. Only readings inside this range are included in cycle usage, costs, and projections.</p><div className="field-row"><div className="field"><label htmlFor="period-start">Start date</label><input id="period-start" type="date" required value={periodForm.start} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, start: e.target.value }))}/></div><div className="field"><label htmlFor="period-end">End date</label><input id="period-end" type="date" required min={periodForm.start} value={periodForm.end} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, end: e.target.value }))}/></div></div><button className="primary modal-submit" type="submit">Save billing period</button></form></Modal>}
+  {modal === "period" && <Modal title={periodExpired ? "Start a new billing period" : periodConfigured ? "Edit billing period" : "Set your billing period"} onClose={() => periodConfigured && !periodExpired && setModal(null)}><form className="reading-form" onSubmit={savePeriod}><p className="period-help">Both dates are required. This form will stay out of the way during an active billing period and return only after its end date.</p><div className="field-row"><div className="field"><label htmlFor="period-start">Start date</label><input id="period-start" type="date" required value={periodForm.start} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, start: e.target.value }))}/></div><div className="field"><label htmlFor="period-end">End date</label><input id="period-end" type="date" required min={periodForm.start} value={periodForm.end} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, end: e.target.value }))}/></div></div><button className="primary modal-submit" type="submit">Save billing period</button></form></Modal>}
   </main>;
 }
 
