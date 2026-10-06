@@ -1,0 +1,10 @@
+{
+  "description": "Track and manage your electricity consumption effortlessly with an intuitive interface that visualizes usage, costs, and future estimates.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
