@@ -1,19 +1,17 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { createWorker, PSM } from "tesseract.js";
 import { createUserWithEmailAndPassword, onAuthStateChanged, reload, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signOut, type User } from "firebase/auth";
-import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
+import { doc, onSnapshot, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
+import { accountRecordState, createAccountLease } from "./account-policy.mjs";
 
 type Reading = { id: string; date: string; time: string; reading: number; notes: string };
 type ReadingWithUsage = Reading & { usage: number; cost: number };
 
 const DEFAULT_RATE = 14.9061;
-const STORAGE_KEY = "meralco-kwh-readings-v1";
-const PERIOD_KEY = "meralco-kwh-billing-period-v1";
-const RATE_KEY = "meralco-kwh-rate-v1";
 const DEFAULT_PERIOD = { start: "2026-09-29", end: "2026-10-28" };
 const seed: Reading[] = [
-  { id: "baseline", date: "2026-09-29", time: "16:10", reading: 8869, notes: "Baseline (bill cut-off)" },
+  { id: "baseline", date: "2026-09-29", time: "16:10", reading: 8869, notes: "Starting reading" },
   { id: "sep30", date: "2026-09-30", time: "18:11", reading: 8873, notes: "Meter photo" },
   { id: "oct01", date: "2026-10-01", time: "22:44", reading: 8877, notes: "Meter photo" },
   { id: "oct02", date: "2026-10-02", time: "16:04", reading: 8878, notes: "Meter photo" },
@@ -25,7 +23,10 @@ const seed: Reading[] = [
 const money = new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" });
 const number = new Intl.NumberFormat("en-PH", { maximumFractionDigits: 2 });
 const wholeNumber = new Intl.NumberFormat("en-PH", { maximumFractionDigits: 0 });
-const todayISO = () => new Date().toISOString().slice(0, 10);
+const todayISO = () => {
+  const now = new Date();
+  return [now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-");
+};
 const timeNow = () => new Date().toTimeString().slice(0, 5);
 
 async function prepareMeterImage(file: File) {
@@ -73,36 +74,38 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   }, [onClose]);
   return <div className="modal-backdrop" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
     <section className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-      <div className="modal-head"><div><p className="kicker">Meter log</p><h2 id="modal-title">{title}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><Icon name="close" /></button></div>
+      <div className="modal-head"><div><p className="kicker">Meter tracker</p><h2 id="modal-title">{title}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><Icon name="close" /></button></div>
       {children}
     </section>
   </div>;
 }
 
 export default function App() {
-  const [readings, setReadings] = useState<Reading[]>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null") as Reading[] | null;
-      if (!saved || (saved.length === 2 && saved.some((item) => item.id === "sample"))) return seed;
-      return saved;
-    } catch { return seed; }
-  });
-  const [periodConfigured, setPeriodConfigured] = useState(() => Boolean(localStorage.getItem(PERIOD_KEY)));
-  const [period, setPeriod] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(PERIOD_KEY) || "null") || DEFAULT_PERIOD; } catch { return DEFAULT_PERIOD; }
-  });
-  const [rate, setRate] = useState(() => {
-    const saved = Number(localStorage.getItem(RATE_KEY));
-    return saved > 0 ? saved : DEFAULT_RATE;
-  });
+  const [user, setUser] = useState<User | null>(null);
+  const [ready, setReady] = useState(false);
+  const [access, setAccess] = useState(false);
+  const [, refresh] = useState(0);
+  useEffect(() => onAuthStateChanged(auth, (next) => {
+    setUser(next);
+    setReady(true);
+    setAccess(false);
+  }), []);
+  if (!ready) return <main className="auth-shell app-shell"><p>Opening your tracker…</p></main>;
+  if (user && !user.emailVerified) return <VerifyEmailScreen user={user} onVerified={() => refresh((value) => value + 1)} />;
+  if (!user && access) return <AuthScreen onDemo={() => setAccess(false)} />;
+  return <Tracker key={user?.uid || "public-demo"} user={user} onSignIn={() => setAccess(true)} />;
+}
+
+function Tracker({ user, onSignIn }: { user: User | null; onSignIn: () => void }) {
+  const guestMode = !user;
+  const [readings, setReadings] = useState<Reading[]>(() => guestMode ? seed.map((item) => ({ ...item })) : []);
+  const [periodConfigured, setPeriodConfigured] = useState(guestMode);
+  const [period, setPeriod] = useState(DEFAULT_PERIOD);
+  const [rate, setRate] = useState(DEFAULT_RATE);
   const [periodForm, setPeriodForm] = useState(period);
   const [rateForm, setRateForm] = useState(String(rate));
-  const [modal, setModal] = useState<"add" | "edit" | "ocr" | "period" | null>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(PERIOD_KEY) || "null");
-      return !saved || todayISO() > saved.end ? "period" : null;
-    } catch { return "period"; }
-  });
+  const [modal, setModal] = useState<"add" | "edit" | "ocr" | "period" | null>(null);
+  const [showHelp, setShowHelp] = useState(false);
   const [editing, setEditing] = useState<Reading | null>(null);
   const [form, setForm] = useState({ date: todayISO(), time: timeNow(), reading: "", notes: "" });
   const [dragging, setDragging] = useState(false);
@@ -112,72 +115,59 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement>(null);
   const cameraRef = useRef<HTMLInputElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
-  const [user, setUser] = useState<User | null>(null);
-  const [guestMode, setGuestMode] = useState(false);
-  const [authVersion, setAuthVersion] = useState(0);
-  const [authReady, setAuthReady] = useState(false);
-  const [cloudReady, setCloudReady] = useState(false);
+  const [cloudReady, setCloudReady] = useState(guestMode);
+  const [oldRecords, setOldRecords] = useState<any>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
   const [syncState, setSyncState] = useState<"connecting" | "synced" | "offline" | "error">("connecting");
-  const lastSyncedPayload = useRef("");
-
-  useEffect(() => onAuthStateChanged(auth, (nextUser) => {
-    setUser(nextUser);
-    if (nextUser) setGuestMode(false);
-    setAuthReady(true);
-    setCloudReady(false);
-    setSyncState(nextUser ? "connecting" : "offline");
-  }), []);
+  const lastSavedPayload = useRef("");
 
   useEffect(() => {
     if (!user || !user.emailVerified) return;
     const stateRef = doc(db, "users", user.uid, "tracker", "state");
-    let unsubscribe = () => {};
-    setReadings([]);
-    setPeriod(DEFAULT_PERIOD);
-    setRate(DEFAULT_RATE);
-    setPeriodConfigured(false);
-    getDoc(stateRef).then(async (snapshot) => {
-      if (!snapshot.exists()) {
-        await setDoc(stateRef, { readings: [], period: DEFAULT_PERIOD, periodConfigured: false, rate: DEFAULT_RATE, updatedAt: Date.now() });
+    const lease = createAccountLease(user.uid, () => auth.currentUser?.uid);
+    let first = true;
+    const unsubscribe = onSnapshot(stateRef, { includeMetadataChanges: true }, (snapshot) => {
+      if (!lease.valid()) return;
+      if (!snapshot.exists() && snapshot.metadata.fromCache) return;
+      const data = snapshot.data();
+      const ownership = accountRecordState(user.uid, data);
+      if (ownership === "blocked") { setSyncState("error"); setCloudReady(false); return; }
+      if (ownership === "review") { setOldRecords(data); setCloudReady(false); return; }
+      setOldRecords(null);
+      const payload = {
+        readings: Array.isArray(data?.readings) ? data.readings as Reading[] : [],
+        period: data?.period?.start && data?.period?.end ? data.period : DEFAULT_PERIOD,
+        periodConfigured: data?.periodConfigured === true,
+        rate: Number(data?.rate) > 0 ? Number(data?.rate) : DEFAULT_RATE,
+      };
+      lastSavedPayload.current = JSON.stringify(payload);
+      setReadings(payload.readings);
+      setPeriod(payload.period);
+      setPeriodConfigured(payload.periodConfigured);
+      setRate(payload.rate);
+      if (first) {
+        setPeriodForm(payload.period);
+        setRateForm(String(payload.rate));
+        first = false;
       }
-      unsubscribe = onSnapshot(stateRef, { includeMetadataChanges: true }, (cloudSnapshot) => {
-        const data = cloudSnapshot.data();
-        if (data?.readings && Array.isArray(data.readings)) setReadings(data.readings as Reading[]);
-        if (data?.period?.start && data?.period?.end) {
-          setPeriod(data.period);
-          setPeriodForm(data.period);
-          setPeriodConfigured(data.periodConfigured !== false);
-          if (data.periodConfigured === false) setModal("period");
-        }
-        if (Number(data?.rate) > 0) setRate(Number(data.rate));
-        lastSyncedPayload.current = JSON.stringify({
-          readings: data?.readings || readings,
-          period: data?.period || period,
-          periodConfigured: data?.periodConfigured ?? periodConfigured,
-          rate: Number(data?.rate) > 0 ? Number(data.rate) : rate,
-        });
-        setCloudReady(true);
-        setSyncState(cloudSnapshot.metadata.hasPendingWrites ? "connecting" : "synced");
-      }, () => setSyncState("error"));
-    }).catch(() => setSyncState("error"));
-    return () => unsubscribe();
-  }, [user, authVersion]);
+      setCloudReady(true);
+      setSyncState(snapshot.metadata.hasPendingWrites ? "connecting" : snapshot.metadata.fromCache ? "offline" : "synced");
+    }, () => { if (lease.valid()) setSyncState("error"); });
+    return () => { lease.close(); unsubscribe(); };
+  }, [user]);
 
   useEffect(() => {
-    if (!user || !user.emailVerified || !cloudReady || guestMode) return;
+    if (!user || !user.emailVerified || !cloudReady || guestMode || auth.currentUser?.uid !== user.uid) return;
     const payload = { readings, period, periodConfigured, rate };
     const serialized = JSON.stringify(payload);
-    if (serialized === lastSyncedPayload.current) return;
-    lastSyncedPayload.current = serialized;
+    if (serialized === lastSavedPayload.current) return;
+    lastSavedPayload.current = serialized;
     setSyncState("connecting");
-    setDoc(doc(db, "users", user.uid, "tracker", "state"), { ...payload, updatedAt: Date.now() })
+    setDoc(doc(db, "users", user.uid, "tracker", "state"), { ...payload, ownerUid: user.uid, updatedAt: Date.now() })
       .then(() => setSyncState("synced"))
       .catch(() => setSyncState("error"));
   }, [readings, period, periodConfigured, rate, user, cloudReady, guestMode]);
 
-  useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(readings)), [readings]);
-  useEffect(() => { if (periodConfigured) localStorage.setItem(PERIOD_KEY, JSON.stringify(period)); }, [period, periodConfigured]);
-  useEffect(() => localStorage.setItem(RATE_KEY, String(rate)), [rate]);
   const computed = useMemo<ReadingWithUsage[]>(() => {
     const sorted = readings.filter((item) => item.date >= period.start && item.date <= period.end).sort((a, b) => `${a.date}T${a.time}`.localeCompare(`${b.date}T${b.time}`));
     return sorted.map((item, index) => ({ ...item, usage: index ? Math.max(0, item.reading - sorted[index - 1].reading) : 0, cost: index ? Math.max(0, item.reading - sorted[index - 1].reading) * rate : 0 }));
@@ -238,25 +228,44 @@ export default function App() {
     setModal("period");
   };
 
-  const openAdd = (reading = "") => { setEditing(null); setForm({ date: todayISO(), time: timeNow(), reading, notes: "" }); setModal("add"); };
+  const openAdd = (reading = "") => {
+    if (!periodConfigured) { openPeriod(); return; }
+    setEditing(null);
+    setForm({ date: readings.length ? todayISO() : period.start, time: timeNow(), reading, notes: readings.length ? "" : "Starting reading" });
+    setModal("add");
+  };
   const openEdit = (item: Reading) => { setEditing(item); setForm({ date: item.date, time: item.time, reading: String(item.reading), notes: item.notes }); setModal("edit"); };
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const value = Number(form.reading);
     if (!Number.isFinite(value) || value < 0) return;
+    if (form.date < period.start || form.date > period.end) {
+      alert("Choose a date inside your bill dates, or change your bill dates first.");
+      return;
+    }
+    const others = readings.filter((entry) => entry.id !== editing?.id).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+    const stamp = form.date + form.time;
+    const before = others.filter((entry) => entry.date + entry.time < stamp).at(-1);
+    const after = others.find((entry) => entry.date + entry.time > stamp);
+    if ((before && value < before.reading) || (after && value > after.reading)) {
+      alert("This number does not fit between your earlier and later readings. Please check the meter number or date.");
+      return;
+    }
     const item = { id: editing?.id || crypto.randomUUID(), date: form.date, time: form.time, reading: value, notes: form.notes.trim() };
     setReadings((current) => editing ? current.map((r) => r.id === editing.id ? item : r) : [...current, item]);
     setModal(null); setEditing(null);
   };
 
   const scan = async (file?: File) => {
+    if (!periodConfigured) { openPeriod(); return; }
     if (!file || !file.type.startsWith("image/")) return;
+    setEditing(null);
     const objectUrl = URL.createObjectURL(file);
     setPreview(objectUrl); setOcrStatus("Preparing image…"); setOcrProgress(0.05); setForm({ date: todayISO(), time: timeNow(), reading: "", notes: "Scanned from meter photo" }); setModal("ocr");
     let worker: Awaited<ReturnType<typeof createWorker>> | null = null;
     try {
       const prepared = await prepareMeterImage(file);
-      worker = await createWorker("eng", 1, { logger: (message) => { if (message.status) setOcrStatus(message.status.replace(/\b\w/g, (character) => character.toUpperCase())); if (message.progress) setOcrProgress(message.progress); } });
+      worker = await createWorker("eng", 1, { logger: (message) => { if (message.status) setOcrStatus(message.status === "recognizing text" ? "Reading the numbers…" : "Getting the photo reader ready…"); if (message.progress) setOcrProgress(message.progress); } });
       await worker.setParameters({ tessedit_char_whitelist: "0123456789", tessedit_pageseg_mode: PSM.SPARSE_TEXT });
       const result = await worker.recognize(prepared);
       const groups = result.data.text.match(/\d+/g) || [];
@@ -274,57 +283,76 @@ export default function App() {
   const importJSON = async (file?: File) => {
     if (!file) return;
     try { const data = JSON.parse(await file.text()); if (!Array.isArray(data) || !data.every((r) => r.date && r.time && Number.isFinite(Number(r.reading)))) throw new Error(); setReadings(data.map((r) => ({ id: r.id || crypto.randomUUID(), date: r.date, time: r.time, reading: Number(r.reading), notes: String(r.notes || "") }))); }
-    catch { alert("That file is not a valid Meralco Tracker JSON export."); }
+    catch { alert("We couldn’t read that backup. Choose a file saved using the Save backup button."); }
   };
 
-  if (!authReady) return <main className="app-shell auth-shell"><div className="auth-card"><span className="brand-mark"><Icon name="bolt" /></span><h1>Meralco kWh Tracker</h1><p>Connecting securely…</p></div></main>;
-  if (user && !user.emailVerified) return <VerifyEmailScreen user={user} onVerified={() => setAuthVersion((version) => version + 1)} />;
-  if (!user && !guestMode) return <AuthScreen onDemo={() => { setReadings(seed); setPeriod(DEFAULT_PERIOD); setPeriodConfigured(true); setRate(DEFAULT_RATE); setModal(null); setGuestMode(true); setSyncState("offline"); }} />;
+  const reviewOldRecords = async (keep: boolean) => {
+    if (!user || auth.currentUser?.uid !== user.uid) return;
+    setReviewBusy(true);
+    try {
+      const target = doc(db, "users", user.uid, "tracker", "state");
+      if (!keep) {
+        // Retain a private recovery copy before replacing previously mixed records.
+        await setDoc(doc(db, "users", user.uid, "recovery", "before-account-fix"), oldRecords);
+      }
+      await setDoc(target, keep
+        ? { ...oldRecords, ownerUid: user.uid, updatedAt: Date.now() }
+        : { readings: [], period: DEFAULT_PERIOD, periodConfigured: false, rate: DEFAULT_RATE, ownerUid: user.uid, updatedAt: Date.now() });
+    } catch { setSyncState("error"); }
+    finally { setReviewBusy(false); }
+  };
+  if (oldRecords) return <main className="app-shell auth-shell"><section className="auth-card"><p className="kicker">One-time account check</p><h1>Let’s keep your readings separate.</h1><p>You’re signed in as <strong>{user?.email}</strong>.</p><p>An earlier version may have copied readings between accounts on this device. Choose whether the old readings belong here.</p><p>{oldRecords.readings?.length || 0} readings found. Starting fresh keeps a private recovery copy.</p>{syncState === "error" && <p role="alert">We couldn’t save your choice. Please try again.</p>}<button className="primary modal-submit" disabled={reviewBusy} onClick={() => reviewOldRecords(false)}>Start this account fresh</button><button className="account-button modal-submit" disabled={reviewBusy} onClick={() => reviewOldRecords(true)}>These readings are mine — keep them</button><button className="account-button modal-submit" onClick={() => signOut(auth)}>Sign out</button></section></main>;
+  if (!cloudReady) return <main className="app-shell auth-shell"><section className="auth-card"><h1>{syncState === "error" ? "We couldn’t open your readings" : "Opening your readings…"}</h1><p>{user?.email}</p><p>{syncState === "error" ? "Check your connection and try again." : "Please wait while we open this account."}</p><button className="primary" onClick={() => window.location.reload()}>Try again</button><button className="account-button" onClick={() => signOut(auth)}>Sign out</button></section></main>;
 
   return <main className="app-shell"><div className="grid-glow" /><div className="container">
-    <header className="topbar"><div className="brand"><span className="brand-mark"><Icon name="bolt" /></span><div><h1>Meralco kWh Tracker</h1><button className="period-link" onClick={openPeriod}><span>Billing period</span>{periodLabel} <b>Manage</b></button></div></div><div className="header-actions"><span className={`sync-pill ${guestMode ? "demo" : syncState}`}><span /> {guestMode ? "Demo mode" : syncState === "synced" ? "Synced" : syncState === "error" ? "Sync error" : "Syncing…"}</span><button className="rate-pill editable-rate" onClick={openPeriod} title="Edit electricity rate"><span /> {money.format(rate)}/kWh <b>Edit</b></button><button className="account-button" onClick={() => guestMode ? setGuestMode(false) : signOut(auth)} title={guestMode ? "Return to sign in" : user?.email || "Signed in"}>{guestMode ? "Exit demo" : "Sign out"}</button><button className="primary small" onClick={() => openAdd()}><Icon name="plus" /> Add reading</button></div></header>
-    <section className="dashboard" aria-label="Current cycle summary">
-      <article className="metric-card today-card"><div className="metric-icon cyan"><Icon name="chart" /></div><p className="kicker">Today's usage</p><h2>{wholeNumber.format(latest.usage)} <small>kWh</small></h2><p className="metric-cost">{money.format(latest.cost)}</p><span className={`change ${change <= 0 ? "good" : "warn"}`}>{previous ? `${change > 0 ? "+" : ""}${change.toFixed(0)}% vs previous` : "First reading"}</span></article>
-      <article className="gauge-card"><div className="gauge" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}><div className="gauge-core"><p>Current reading</p><h2>{latest.reading.toLocaleString("en-PH")} <small>kWh</small></h2><span>Estimated final reading <b>{wholeNumber.format(projectedMeterReading)} kWh</b><em>{money.format(projectedCost)} estimated bill</em></span></div></div><div className="cycle-stats"><div><span>Cycle consumption</span><strong>{wholeNumber.format(cycleUsage)} kWh</strong></div><i /><div><span>Billing day</span><strong>{Math.min(elapsedPeriodDays, totalPeriodDays)} of {totalPeriodDays}</strong></div><i /><div><span>Running cycle cost</span><strong>{money.format(cycleCost)}</strong></div></div></article>
-      <article className="metric-card estimate-card"><div className="metric-icon green"><Icon name="trend" /></div><p className="kicker">Tomorrow est.</p><h2>{wholeNumber.format(forecastTomorrow)} <small>kWh</small></h2><p className="metric-cost">{money.format(forecastTomorrow * rate)}</p><span className="projection">Trend-adjusted <b>Recent daily pattern</b></span></article>
+    <div className="welcome-bar"><span className="wordmark">MERALPON<span> / electricity, understood</span></span><button className="account-button" onClick={() => setShowHelp(true)}>How it works</button></div>
+    {guestMode ? <section className="demo-welcome"><div><p className="kicker">Try it before you join</p><h2>A clearer view of your electricity.</h2><p>Explore this sample, change a reading, and see your estimated bill update. Your changes here are temporary.</p></div><button className="primary" onClick={onSignIn}>Sign in / Create account</button></section> : <div className="account-context">Your private tracker <strong>{user?.email}</strong></div>}
+    {!guestMode && (!periodConfigured || periodExpired) && <section className="setup-notice"><div><strong>{periodExpired && periodConfigured ? "Ready for your next bill?" : "Start with your bill dates"}</strong><p>Choose your dates and price per kWh, then add your first meter reading.</p></div><button className="primary" onClick={openPeriod}>Set up my tracker</button></section>}
+    {!guestMode && !readings.length && periodConfigured && <section className="setup-notice"><div><strong>No readings yet</strong><p>Add the meter number from the first day of your bill. This is your starting point.</p></div><button className="primary" onClick={() => openAdd()}>Add first reading</button></section>}
+    {showHelp && <Tutorial onClose={() => setShowHelp(false)} onDemo={() => setShowHelp(false)} />}
+    <header className="topbar"><div className="brand"><span className="brand-mark"><Icon name="bolt" /></span><div><h1>Meralco kWh Tracker</h1><button className="period-link" onClick={openPeriod}><span>Billing period</span>{periodLabel} <b>Manage</b></button></div></div><div className="header-actions"><span className={`sync-pill ${guestMode ? "demo" : syncState}`}><span /> {guestMode ? "Sample" : syncState === "synced" ? "Saved" : syncState === "error" ? "Couldn’t save" : syncState === "offline" ? "Waiting for internet" : "Saving…"}</span><button className="rate-pill editable-rate" onClick={openPeriod} title="Edit electricity rate"><span /> {money.format(rate)}/kWh <b>Edit</b></button><button className="account-button" onClick={() => guestMode ? onSignIn() : signOut(auth)} title={guestMode ? "Return to sign in" : user?.email || "Signed in"}>{guestMode ? "Sign in" : "Sign out"}</button><button className="primary small" onClick={() => openAdd()}><Icon name="plus" /> Add reading</button></div></header>
+    <section className="dashboard" aria-label="Your electricity summary">
+      <article className="metric-card today-card"><div className="metric-icon cyan"><Icon name="chart" /></div><p className="kicker">Latest usage</p><h2>{wholeNumber.format(latest.usage)} <small>kWh</small></h2><p className="metric-cost">{money.format(latest.cost)}</p><span className={`change ${change <= 0 ? "good" : "warn"}`}>{previous ? `${change > 0 ? "+" : ""}${change.toFixed(0)}% vs previous` : "First reading"}</span></article>
+      <article className="gauge-card"><div className="gauge" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}><div className="gauge-core"><p>Current reading</p><h2>{latest.reading.toLocaleString("en-PH")} <small>kWh</small></h2><span>Estimated final reading <b>{wholeNumber.format(projectedMeterReading)} kWh</b><em>{money.format(projectedCost)} estimated bill</em></span></div></div><div className="cycle-stats"><div><span>Used this period</span><strong>{wholeNumber.format(cycleUsage)} kWh</strong></div><i /><div><span>Billing day</span><strong>{Math.min(elapsedPeriodDays, totalPeriodDays)} of {totalPeriodDays}</strong></div><i /><div><span>Cost so far</span><strong>{money.format(cycleCost)}</strong></div></div></article>
+      <article className="metric-card estimate-card"><div className="metric-icon green"><Icon name="trend" /></div><p className="kicker">Tomorrow’s estimate</p><h2>{wholeNumber.format(forecastTomorrow)} <small>kWh</small></h2><p className="metric-cost">{money.format(forecastTomorrow * rate)}</p><span className="projection">Based on <b>your recent usage</b></span></article>
     </section>
-    <section className="work-grid"><article className="panel upload-panel"><div className="section-title"><div><p className="kicker">Quick capture</p><h2>Scan your meter</h2></div><span>Enhanced OCR</span></div><input ref={fileRef} hidden type="file" accept="image/*" onClick={(event) => { event.currentTarget.value = ""; }} onChange={(e) => scan(e.target.files?.[0])} /><input ref={cameraRef} hidden type="file" accept="image/*" capture="environment" onClick={(event) => { event.currentTarget.value = ""; }} onChange={(e) => scan(e.target.files?.[0])} /><div className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragging(false); scan(e.dataTransfer.files[0]); }}><span className="camera"><Icon name="camera" /></span><strong>Capture your meter reading</strong><small>For best results, fill the frame with the meter digits</small><div className="capture-actions"><button type="button" className="outline-button camera-button" onClick={() => cameraRef.current?.click()}><Icon name="camera" /> Open camera</button><button type="button" className="outline-button" onClick={() => fileRef.current?.click()}><Icon name="upload" /> Choose image</button></div></div></article>
+    <section className="work-grid"><article className="panel upload-panel"><div className="section-title"><div><p className="kicker">Add a photo</p><h2>Read a meter photo</h2></div><span>Photo reader</span></div><input ref={fileRef} hidden type="file" accept="image/*" onClick={(event) => { event.currentTarget.value = ""; }} onChange={(e) => scan(e.target.files?.[0])} /><input ref={cameraRef} hidden type="file" accept="image/*" capture="environment" onClick={(event) => { event.currentTarget.value = ""; }} onChange={(e) => scan(e.target.files?.[0])} /><div className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragging(false); scan(e.dataTransfer.files[0]); }}><span className="camera"><Icon name="camera" /></span><strong>Capture your meter reading</strong><small>For best results, fill the frame with the meter digits</small><div className="capture-actions"><button type="button" className="outline-button camera-button" onClick={() => cameraRef.current?.click()}><Icon name="camera" /> Open camera</button><button type="button" className="outline-button" onClick={() => fileRef.current?.click()}><Icon name="upload" /> Choose image</button></div></div></article>
       <aside className="panel insight-panel"><div className="section-title"><div><p className="kicker">Complete billing period</p><h2>Usage outlook</h2></div><span className="scroll-hint">Scroll →</span></div><div className="insight-number"><span>Recent daily average</span><strong>{wholeNumber.format(rollingAverage)} kWh</strong></div><div className="usage-strip">{computed.map((item, index) => <div className="usage-day" key={item.id}><div className="usage-bar"><i style={{ height: `${index === 0 ? 8 : Math.max(12, Math.min(100, item.usage / Math.max(...computed.map((value) => value.usage), 1) * 100))}%` }} /></div><strong>{index === 0 ? "Start" : `${wholeNumber.format(item.usage)} kWh`}</strong><span>{new Date(`${item.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric" })}</span><small>{item.time}</small></div>)}</div><p>Every logged date is shown from the billing-period start. Estimated final meter reading: <b>{wholeNumber.format(projectedMeterReading)} kWh</b> with an estimated bill of <b>{money.format(projectedCost)}</b>.</p></aside></section>
-    <section className="panel ledger"><div className="ledger-head"><div><p className="kicker">Consumption history</p><h2>Meter readings</h2><p>{computed.length} entries synced to your account</p></div><div className="ledger-actions"><button onClick={() => importRef.current?.click()}>Import JSON</button><input ref={importRef} hidden type="file" accept="application/json,.json" onChange={(e) => importJSON(e.target.files?.[0])}/><button onClick={() => exportFile("json")}><Icon name="download" /> JSON</button><button onClick={() => exportFile("csv")}><Icon name="download" /> CSV</button></div></div><div className="table-wrap"><table><thead><tr><th>Date & time</th><th>Meter reading</th><th>Daily usage</th><th>Daily cost</th><th>Notes</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{[...computed].reverse().map((r) => <tr key={r.id}><td><strong>{new Date(`${r.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}</strong><span>{r.time}</span></td><td>{r.reading.toLocaleString("en-PH")} <small>kWh</small></td><td className="usage">{r.id === computed[0]?.id ? "—" : `+${number.format(r.usage)} kWh`}</td><td>{r.id === computed[0]?.id ? "—" : money.format(r.cost)}</td><td className="notes">{r.notes || "—"}</td><td><div className="row-actions"><button onClick={() => openEdit(r)} aria-label="Edit reading"><Icon name="edit" /></button><button disabled={readings.length === 1} onClick={() => confirm("Delete this reading?") && setReadings((list) => list.filter((x) => x.id !== r.id))} aria-label="Delete reading"><Icon name="trash" /></button></div></td></tr>)}</tbody></table></div></section>
-    <footer>Calculated at {money.format(rate)} per kWh · Synced securely with Firebase</footer>
+    <section className="panel ledger"><div className="ledger-head"><div><p className="kicker">Meter history</p><h2>Meter readings</h2><p>{computed.length} {guestMode ? "sample readings · changes are temporary" : "readings saved to this account"}</p></div><div className="ledger-actions"><button onClick={() => importRef.current?.click()}>Restore backup</button><input ref={importRef} hidden type="file" accept="application/json,.json" onChange={(e) => importJSON(e.target.files?.[0])}/><button onClick={() => exportFile("json")}><Icon name="download" /> Save backup</button><button onClick={() => exportFile("csv")}><Icon name="download" /> Spreadsheet</button></div></div><div className="table-wrap"><table><thead><tr><th>Date & time</th><th>Meter reading</th><th>Daily usage</th><th>Daily cost</th><th>Notes</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{[...computed].reverse().map((r) => <tr key={r.id}><td><strong>{new Date(`${r.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}</strong><span>{r.time}</span></td><td>{r.reading.toLocaleString("en-PH")} <small>kWh</small></td><td className="usage">{r.id === computed[0]?.id ? "—" : `+${number.format(r.usage)} kWh`}</td><td>{r.id === computed[0]?.id ? "—" : money.format(r.cost)}</td><td className="notes">{r.notes || "—"}</td><td><div className="row-actions"><button onClick={() => openEdit(r)} aria-label="Edit reading"><Icon name="edit" /></button><button disabled={readings.length === 1} onClick={() => confirm("Delete this reading?") && setReadings((list) => list.filter((x) => x.id !== r.id))} aria-label="Delete reading"><Icon name="trash" /></button></div></td></tr>)}</tbody></table></div></section>
+    <footer>{guestMode ? "Sample dashboard · No account needed · Changes are temporary" : "Your readings are private to your account"}<br />Estimated at {money.format(rate)} per kWh. Your actual bill may include other charges.</footer>
   </div>
   {(modal === "add" || modal === "edit") && <Modal title={modal === "edit" ? "Edit reading" : "Add a reading"} onClose={() => setModal(null)}><ReadingForm form={form} setForm={setForm} submit={submit} label={modal === "edit" ? "Save changes" : "Add to log"} /></Modal>}
-  {modal === "ocr" && <Modal title="Verify scanned reading" onClose={() => setModal(null)}><div className="scan-preview">{preview && <img src={preview} alt="Uploaded meter" />}<div className="scan-status"><span style={{ width: `${ocrProgress * 100}%` }} /></div><p>{ocrStatus}</p></div><ReadingForm form={form} setForm={setForm} submit={submit} label="Confirm & save" /></Modal>}
-  {modal === "period" && <Modal title={periodExpired ? "Start a new billing period" : periodConfigured ? "Billing settings" : "Set your billing period"} onClose={() => periodConfigured && !periodExpired && setModal(null)}><form className="reading-form" onSubmit={savePeriod}><p className="period-help">Set the dates shown on your bill and your current electricity price. Changes sync to every signed-in device.</p><div className="field-row"><div className="field"><label htmlFor="period-start">Billing start</label><input id="period-start" type="date" required value={periodForm.start} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, start: e.target.value }))}/></div><div className="field"><label htmlFor="period-end">Billing end</label><input id="period-end" type="date" required min={periodForm.start} value={periodForm.end} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, end: e.target.value }))}/></div></div><div className="field featured rate-field"><label htmlFor="rate">Electricity rate</label><div><span>₱</span><input id="rate" type="number" required min="0.0001" step="0.0001" inputMode="decimal" value={rateForm} onChange={(event) => setRateForm(event.target.value)} /><span>per kWh</span></div></div><button className="primary modal-submit" type="submit">Save billing settings</button>{user && <button className="danger-link" type="button" onClick={resetAccount}>Reset this account and delete all readings</button>}</form></Modal>}
+  {modal === "ocr" && <Modal title="Check the number" onClose={() => setModal(null)}><div className="scan-preview">{preview && <img src={preview} alt="Uploaded meter" />}<div className="scan-status"><span style={{ width: `${ocrProgress * 100}%` }} /></div><p>{ocrStatus}</p></div><ReadingForm form={form} setForm={setForm} submit={submit} label="Confirm & save" /></Modal>}
+  {modal === "period" && <Modal title={periodExpired ? "Start a new billing period" : periodConfigured ? "Billing settings" : "Set your billing period"} onClose={() => periodConfigured && !periodExpired && setModal(null)}><form className="reading-form" onSubmit={savePeriod}><p className="period-help">Set the dates shown on your bill and your current electricity price. These settings are saved to your account.</p><div className="field-row"><div className="field"><label htmlFor="period-start">Billing start</label><input id="period-start" type="date" required value={periodForm.start} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, start: e.target.value }))}/></div><div className="field"><label htmlFor="period-end">Billing end</label><input id="period-end" type="date" required min={periodForm.start} value={periodForm.end} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, end: e.target.value }))}/></div></div><div className="field featured rate-field"><label htmlFor="rate">Electricity rate</label><div><span>₱</span><input id="rate" type="number" required min="0.0001" step="0.0001" inputMode="decimal" value={rateForm} onChange={(event) => setRateForm(event.target.value)} /><span>per kWh</span></div></div><button className="primary modal-submit" type="submit">Save billing settings</button>{user && <button className="danger-link" type="button" onClick={resetAccount}>Reset this account and delete all readings</button>}</form></Modal>}
   </main>;
 }
 
 function VerifyEmailScreen({ user, onVerified }: { user: User; onVerified: () => void }) {
-  const [message, setMessage] = useState("We sent a verification link to your inbox.");
+  const [message, setMessage] = useState("Open the link in your email to continue. If you need a new link, use the button below.");
   const [busy, setBusy] = useState(false);
 
   const checkVerification = async () => {
     setBusy(true);
     try {
       await reload(user);
-      if (user.emailVerified) onVerified();
-      else setMessage("Not verified yet. Open the link in your email, then check again.");
+      if (user.emailVerified) { await user.getIdToken(true); onVerified(); }
+      else setMessage("We haven’t confirmed it yet. Open the link in your email, then check again.");
     } catch { setMessage("Could not check right now. Please try again."); }
     finally { setBusy(false); }
   };
 
   const resend = async () => {
     setBusy(true);
-    try { await sendEmailVerification(user); setMessage("A new verification email was sent. Check your inbox and spam folder."); }
+    try { await sendEmailVerification(user); setMessage("A new confirmation email was sent. Check your inbox and spam folder."); }
     catch { setMessage("Please wait before requesting another email, then try again."); }
     finally { setBusy(false); }
   };
 
-  return <main className="app-shell auth-shell"><div className="grid-glow" /><section className="auth-card verify-card"><span className="verify-icon">@</span><p className="kicker">One last step</p><h1>Verify your email</h1><p>For your security, the dashboard stays locked until <b>{user.email}</b> is verified.</p><div className="verify-message">{message}</div><button className="primary modal-submit" disabled={busy} onClick={checkVerification}>{busy ? "Checking…" : "I verified my email"}</button><div className="guest-actions"><button type="button" disabled={busy} onClick={resend}>Resend email</button><button type="button" onClick={() => signOut(auth)}>Use another account</button></div></section></main>;
+  return <main className="app-shell auth-shell"><div className="grid-glow" /><section className="auth-card verify-card"><span className="verify-icon">@</span><p className="kicker">One last step</p><h1>Confirm your email</h1><p>Your private readings will open after <b>{user.email}</b> is confirmed.</p><div className="verify-message">{message}</div><button className="primary modal-submit" disabled={busy} onClick={checkVerification}>{busy ? "Checking…" : "I clicked the email link"}</button><div className="guest-actions"><button type="button" disabled={busy} onClick={resend}>Resend email</button><button type="button" onClick={() => signOut(auth)}>Sign out</button></div></section></main>;
 }
 
 function Tutorial({ onClose, onDemo }: { onClose: () => void; onDemo: () => void }) {
-  return <div className="modal-backdrop tutorial-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title"><div className="modal-head"><div><p className="kicker">Quick start</p><h2 id="tutorial-title">How the tracker works</h2></div><button className="icon-button" onClick={onClose} aria-label="Close tutorial"><Icon name="close" /></button></div><div className="tutorial-steps"><article><span>1</span><div><h3>Set your billing cycle</h3><p>Enter the start and end dates from your Meralco bill, plus your current peso rate per kWh.</p></div></article><article><span>2</span><div><h3>Add meter readings</h3><p>Type a reading or photograph the meter. Always verify the number before saving.</p></div></article><article><span>3</span><div><h3>Follow the forecast</h3><p>The dashboard calculates daily usage, running cost, tomorrow’s estimate, and the likely final meter reading.</p></div></article><article><span>4</span><div><h3>Stay synchronized</h3><p>Sign into the same verified account on another device and your real readings will appear automatically.</p></div></article></div><button className="primary modal-submit" onClick={onDemo}>Try the demo without an account</button></section></div>;
+  return <div className="modal-backdrop tutorial-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title"><div className="modal-head"><div><p className="kicker">Getting started</p><h2 id="tutorial-title">How the tracker works</h2></div><button className="icon-button" onClick={onClose} aria-label="Close tutorial"><Icon name="close" /></button></div><div className="tutorial-steps"><article><span>1</span><div><h3>Set your bill dates</h3><p>Enter the start and end dates from your Meralco bill, plus your current peso rate per kWh.</p></div></article><article><span>2</span><div><h3>Add meter readings</h3><p>Type a reading or photograph the meter. Always verify the number before saving.</p></div></article><article><span>3</span><div><h3>See what your next bill could be</h3><p>The dashboard calculates daily usage, running cost, tomorrow’s estimate, and the likely final meter reading.</p></div></article><article><span>4</span><div><h3>Use it on your other devices</h3><p>Sign into the same account on another device and your real readings will appear automatically.</p></div></article></div><button className="primary modal-submit" onClick={onDemo}>Got it</button></section></div>;
 }
 
 function AuthScreen({ onDemo }: { onDemo: () => void }) {
@@ -354,7 +382,7 @@ function AuthScreen({ onDemo }: { onDemo: () => void }) {
       } else await signInWithEmailAndPassword(auth, email.trim(), password);
     } catch (reason) {
       const code = (reason as { code?: string }).code || "";
-      setError(code.includes("invalid-credential") ? "Incorrect email or password." : code.includes("email-already-in-use") ? "That email already has an account. Sign in instead." : code.includes("weak-password") ? "Use a stronger password with at least 6 characters." : code.includes("too-many-requests") ? "Too many attempts. Please wait a moment and try again." : "Could not continue. Check Firebase setup and try again.");
+      setError(code.includes("invalid-credential") ? "Incorrect email or password." : code.includes("email-already-in-use") ? "That email already has an account. Sign in instead." : code.includes("weak-password") ? "Use a stronger password with at least 6 characters." : code.includes("too-many-requests") ? "Too many attempts. Please wait a moment and try again." : "Could not continue. Please try again in a moment.");
     } finally { setBusy(false); }
   };
 
@@ -381,7 +409,7 @@ function AuthScreen({ onDemo }: { onDemo: () => void }) {
     setNotice("");
   };
 
-  return <main className="app-shell auth-shell"><div className="grid-glow" /><section className="auth-card"><div className="auth-brand"><span className="brand-mark"><Icon name="bolt" /></span><div><p className="kicker">Private energy dashboard</p><h1>Meralco Tracker</h1></div></div><p className="auth-intro">Your readings, billing period, and estimates—securely synchronized across your devices.</p><div className="auth-tabs" role="tablist" aria-label="Account access"><button type="button" role="tab" aria-selected={mode === "signin"} className={mode === "signin" ? "active" : ""} onClick={() => changeMode("signin")}>Sign in</button><button type="button" role="tab" aria-selected={mode === "signup"} className={mode === "signup" ? "active" : ""} onClick={() => changeMode("signup")}>Register</button></div><form className="reading-form auth-form" onSubmit={authenticate}><div className="field"><label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></div><div className="field"><div className="password-label"><label htmlFor="auth-password">Password</label>{mode === "signin" && <button type="button" onClick={resetPassword}>Forgot password?</button>}</div><div className="password-input"><input id="auth-password" type={showPassword ? "text" : "password"} required minLength={6} autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={mode === "signup" ? "At least 6 characters" : "Enter your password"}/><button type="button" onClick={() => setShowPassword((shown) => !shown)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></div></div>{mode === "signup" && <div className="field"><label htmlFor="auth-confirm-password">Confirm password</label><div className="password-input"><input id="auth-confirm-password" type={showPassword ? "text" : "password"} required minLength={6} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Enter it again"/></div></div>}{error && <p className="auth-error">{error}</p>}{notice && <p className="auth-notice">{notice}</p>}<button className="primary modal-submit auth-submit" disabled={busy}>{busy ? "Please wait…" : mode === "signup" ? "Create secure account" : "Sign in to dashboard"}</button></form><div className="guest-actions"><button type="button" onClick={onDemo}>Explore live demo</button><button type="button" onClick={() => setShowTutorial(true)}>How it works</button></div><p className="auth-security">Your password is handled by Firebase Authentication and is never stored inside the tracker.</p></section>{showTutorial && <Tutorial onClose={() => setShowTutorial(false)} onDemo={() => { setShowTutorial(false); onDemo(); }} />}</main>;
+  return <main className="app-shell auth-shell"><div className="grid-glow" /><section className="auth-card"><div className="auth-brand"><span className="brand-mark"><Icon name="bolt" /></span><div><p className="kicker">Your electricity, in one place</p><h1>Meralco Tracker</h1></div></div><p className="auth-intro">Your readings, billing period, and estimates—saved to your account on every device.</p><div className="auth-tabs" role="tablist" aria-label="Account access"><button type="button" role="tab" aria-selected={mode === "signin"} className={mode === "signin" ? "active" : ""} onClick={() => changeMode("signin")}>Sign in</button><button type="button" role="tab" aria-selected={mode === "signup"} className={mode === "signup" ? "active" : ""} onClick={() => changeMode("signup")}>Create account</button></div><form className="reading-form auth-form" onSubmit={authenticate}><div className="field"><label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></div><div className="field"><div className="password-label"><label htmlFor="auth-password">Password</label>{mode === "signin" && <button type="button" onClick={resetPassword}>Forgot password?</button>}</div><div className="password-input"><input id="auth-password" type={showPassword ? "text" : "password"} required minLength={6} autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={mode === "signup" ? "At least 6 characters" : "Enter your password"}/><button type="button" onClick={() => setShowPassword((shown) => !shown)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></div></div>{mode === "signup" && <div className="field"><label htmlFor="auth-confirm-password">Confirm password</label><div className="password-input"><input id="auth-confirm-password" type={showPassword ? "text" : "password"} required minLength={6} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Enter it again"/></div></div>}{error && <p className="auth-error">{error}</p>}{notice && <p className="auth-notice">{notice}</p>}<button className="primary modal-submit auth-submit" disabled={busy}>{busy ? "Please wait…" : mode === "signup" ? "Create account" : "Sign in to dashboard"}</button></form><div className="guest-actions"><button type="button" onClick={onDemo}>Back to sample dashboard</button><button type="button" onClick={() => setShowTutorial(true)}>How it works</button></div><p className="auth-security">Your readings are private to your account.</p></section>{showTutorial && <Tutorial onClose={() => setShowTutorial(false)} onDemo={() => { setShowTutorial(false); onDemo(); }} />}</main>;
 }
 
 function ReadingForm({ form, setForm, submit, label }: { form: { date: string; time: string; reading: string; notes: string }; setForm: React.Dispatch<React.SetStateAction<{ date: string; time: string; reading: string; notes: string }>>; submit: (e: FormEvent) => void; label: string }) {
