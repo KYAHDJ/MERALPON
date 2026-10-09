@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { recognize } from "tesseract.js";
-import { createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signOut, type User } from "firebase/auth";
+import { createUserWithEmailAndPassword, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signOut, type User } from "firebase/auth";
 import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
 
@@ -222,25 +222,61 @@ export default function App() {
 
 function AuthScreen() {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(() => localStorage.getItem("meralco-login-email") || "");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [rememberEmail, setRememberEmail] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   const authenticate = async (event: FormEvent) => {
     event.preventDefault();
+    if (mode === "signup" && password !== confirmPassword) {
+      setError("The passwords do not match.");
+      return;
+    }
     setBusy(true);
     setError("");
+    setNotice("");
     try {
-      if (mode === "signup") await createUserWithEmailAndPassword(auth, email, password);
-      else await signInWithEmailAndPassword(auth, email, password);
+      if (rememberEmail) localStorage.setItem("meralco-login-email", email.trim());
+      else localStorage.removeItem("meralco-login-email");
+      if (mode === "signup") {
+        const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
+        await sendEmailVerification(credential.user);
+      } else await signInWithEmailAndPassword(auth, email.trim(), password);
     } catch (reason) {
       const code = (reason as { code?: string }).code || "";
-      setError(code.includes("invalid-credential") ? "Incorrect email or password." : code.includes("email-already-in-use") ? "That email already has an account. Sign in instead." : code.includes("weak-password") ? "Use a password with at least 6 characters." : "Could not continue. Check Firebase setup and try again.");
+      setError(code.includes("invalid-credential") ? "Incorrect email or password." : code.includes("email-already-in-use") ? "That email already has an account. Sign in instead." : code.includes("weak-password") ? "Use a stronger password with at least 6 characters." : code.includes("too-many-requests") ? "Too many attempts. Please wait a moment and try again." : "Could not continue. Check Firebase setup and try again.");
     } finally { setBusy(false); }
   };
 
-  return <main className="app-shell auth-shell"><div className="grid-glow" /><section className="auth-card"><span className="brand-mark"><Icon name="bolt" /></span><p className="kicker">Private cloud sync</p><h1>Meralco kWh Tracker</h1><p>Use the same account on every device to keep readings synchronized.</p><form className="reading-form auth-form" onSubmit={authenticate}><div className="field"><label htmlFor="auth-email">Email</label><input id="auth-email" type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></div><div className="field"><label htmlFor="auth-password">Password</label><input id="auth-password" type="password" required minLength={6} autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} /></div>{error && <p className="auth-error">{error}</p>}<button className="primary modal-submit" disabled={busy}>{busy ? "Please wait…" : mode === "signup" ? "Create account" : "Sign in"}</button></form><button className="auth-switch" onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setError(""); }}>{mode === "signin" ? "First time? Create an account" : "Already have an account? Sign in"}</button></section></main>;
+  const resetPassword = async () => {
+    if (!email.trim()) {
+      setError("Enter your email address first, then select Forgot password.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await sendPasswordResetEmail(auth, email.trim());
+      setNotice("Password reset email sent. Check your inbox and spam folder.");
+    } catch {
+      setError("The reset email could not be sent. Check the address and try again.");
+    } finally { setBusy(false); }
+  };
+
+  const changeMode = (nextMode: "signin" | "signup") => {
+    setMode(nextMode);
+    setPassword("");
+    setConfirmPassword("");
+    setError("");
+    setNotice("");
+  };
+
+  return <main className="app-shell auth-shell"><div className="grid-glow" /><section className="auth-card"><div className="auth-brand"><span className="brand-mark"><Icon name="bolt" /></span><div><p className="kicker">Private energy dashboard</p><h1>Meralco Tracker</h1></div></div><p className="auth-intro">Your readings, billing period, and estimates—securely synchronized across your devices.</p><div className="auth-tabs" role="tablist" aria-label="Account access"><button type="button" role="tab" aria-selected={mode === "signin"} className={mode === "signin" ? "active" : ""} onClick={() => changeMode("signin")}>Sign in</button><button type="button" role="tab" aria-selected={mode === "signup"} className={mode === "signup" ? "active" : ""} onClick={() => changeMode("signup")}>Register</button></div><form className="reading-form auth-form" onSubmit={authenticate}><div className="field"><label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></div><div className="field"><div className="password-label"><label htmlFor="auth-password">Password</label>{mode === "signin" && <button type="button" onClick={resetPassword}>Forgot password?</button>}</div><div className="password-input"><input id="auth-password" type={showPassword ? "text" : "password"} required minLength={6} autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={mode === "signup" ? "At least 6 characters" : "Enter your password"}/><button type="button" onClick={() => setShowPassword((shown) => !shown)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></div></div>{mode === "signup" && <div className="field"><label htmlFor="auth-confirm-password">Confirm password</label><div className="password-input"><input id="auth-confirm-password" type={showPassword ? "text" : "password"} required minLength={6} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Enter it again"/></div></div>}<label className="remember-row"><input type="checkbox" checked={rememberEmail} onChange={(event) => setRememberEmail(event.target.checked)} /><span><b>Remember my email</b><small>Your browser may also offer to securely save your password.</small></span></label>{error && <p className="auth-error">{error}</p>}{notice && <p className="auth-notice">{notice}</p>}<button className="primary modal-submit auth-submit" disabled={busy}>{busy ? "Please wait…" : mode === "signup" ? "Create secure account" : "Sign in to dashboard"}</button></form><p className="auth-security">Your password is handled by Firebase Authentication and is never stored inside the tracker.</p></section></main>;
 }
 
 function ReadingForm({ form, setForm, submit, label }: { form: { date: string; time: string; reading: string; notes: string }; setForm: React.Dispatch<React.SetStateAction<{ date: string; time: string; reading: string; notes: string }>>; submit: (e: FormEvent) => void; label: string }) {
