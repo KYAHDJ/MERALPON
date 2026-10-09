@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
-import { recognize } from "tesseract.js";
+import { createWorker, PSM } from "tesseract.js";
 import { createUserWithEmailAndPassword, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signOut, type User } from "firebase/auth";
 import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
@@ -7,10 +7,10 @@ import { auth, db } from "./firebase";
 type Reading = { id: string; date: string; time: string; reading: number; notes: string };
 type ReadingWithUsage = Reading & { usage: number; cost: number };
 
-const RATE = 14.9061;
-const GOAL = 250;
+const DEFAULT_RATE = 14.9061;
 const STORAGE_KEY = "meralco-kwh-readings-v1";
 const PERIOD_KEY = "meralco-kwh-billing-period-v1";
+const RATE_KEY = "meralco-kwh-rate-v1";
 const DEFAULT_PERIOD = { start: "2026-09-29", end: "2026-10-28" };
 const seed: Reading[] = [
   { id: "baseline", date: "2026-09-29", time: "16:10", reading: 8869, notes: "Baseline (bill cut-off)" },
@@ -26,6 +26,27 @@ const money = new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP
 const number = new Intl.NumberFormat("en-PH", { maximumFractionDigits: 2 });
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const timeNow = () => new Date().toTimeString().slice(0, 5);
+
+async function prepareMeterImage(file: File) {
+  const image = await createImageBitmap(file);
+  const scale = Math.max(1, Math.min(2.5, 1800 / image.width));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(image.width * scale);
+  canvas.height = Math.round(image.height * scale);
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return file;
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+  for (let index = 0; index < pixels.data.length; index += 4) {
+    const gray = pixels.data[index] * .3 + pixels.data[index + 1] * .59 + pixels.data[index + 2] * .11;
+    const contrasted = Math.max(0, Math.min(255, (gray - 128) * 1.7 + 128));
+    pixels.data[index] = contrasted;
+    pixels.data[index + 1] = contrasted;
+    pixels.data[index + 2] = contrasted;
+  }
+  context.putImageData(pixels, 0, 0);
+  return await new Promise<Blob>((resolve) => canvas.toBlob((blob) => resolve(blob || file), "image/jpeg", .94));
+}
 
 function Icon({ name, className = "" }: { name: string; className?: string }) {
   const paths: Record<string, React.ReactNode> = {
@@ -69,7 +90,12 @@ export default function App() {
   const [period, setPeriod] = useState(() => {
     try { return JSON.parse(localStorage.getItem(PERIOD_KEY) || "null") || DEFAULT_PERIOD; } catch { return DEFAULT_PERIOD; }
   });
+  const [rate, setRate] = useState(() => {
+    const saved = Number(localStorage.getItem(RATE_KEY));
+    return saved > 0 ? saved : DEFAULT_RATE;
+  });
   const [periodForm, setPeriodForm] = useState(period);
+  const [rateForm, setRateForm] = useState(String(rate));
   const [modal, setModal] = useState<"add" | "edit" | "ocr" | "period" | null>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(PERIOD_KEY) || "null");
@@ -104,7 +130,7 @@ export default function App() {
     let unsubscribe = () => {};
     getDoc(stateRef).then(async (snapshot) => {
       if (!snapshot.exists()) {
-        await setDoc(stateRef, { readings, period, periodConfigured, updatedAt: Date.now() });
+        await setDoc(stateRef, { readings, period, periodConfigured, rate, updatedAt: Date.now() });
       }
       unsubscribe = onSnapshot(stateRef, { includeMetadataChanges: true }, (cloudSnapshot) => {
         const data = cloudSnapshot.data();
@@ -114,10 +140,12 @@ export default function App() {
           setPeriodForm(data.period);
           setPeriodConfigured(data.periodConfigured !== false);
         }
+        if (Number(data?.rate) > 0) setRate(Number(data.rate));
         lastSyncedPayload.current = JSON.stringify({
           readings: data?.readings || readings,
           period: data?.period || period,
           periodConfigured: data?.periodConfigured ?? periodConfigured,
+          rate: Number(data?.rate) > 0 ? Number(data.rate) : rate,
         });
         setCloudReady(true);
         setSyncState(cloudSnapshot.metadata.hasPendingWrites ? "connecting" : "synced");
@@ -128,7 +156,7 @@ export default function App() {
 
   useEffect(() => {
     if (!user || !cloudReady) return;
-    const payload = { readings, period, periodConfigured };
+    const payload = { readings, period, periodConfigured, rate };
     const serialized = JSON.stringify(payload);
     if (serialized === lastSyncedPayload.current) return;
     lastSyncedPayload.current = serialized;
@@ -136,35 +164,58 @@ export default function App() {
     setDoc(doc(db, "users", user.uid, "tracker", "state"), { ...payload, updatedAt: Date.now() })
       .then(() => setSyncState("synced"))
       .catch(() => setSyncState("error"));
-  }, [readings, period, periodConfigured, user, cloudReady]);
+  }, [readings, period, periodConfigured, rate, user, cloudReady]);
 
   useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(readings)), [readings]);
   useEffect(() => { if (periodConfigured) localStorage.setItem(PERIOD_KEY, JSON.stringify(period)); }, [period, periodConfigured]);
+  useEffect(() => localStorage.setItem(RATE_KEY, String(rate)), [rate]);
   const computed = useMemo<ReadingWithUsage[]>(() => {
     const sorted = readings.filter((item) => item.date >= period.start && item.date <= period.end).sort((a, b) => `${a.date}T${a.time}`.localeCompare(`${b.date}T${b.time}`));
-    return sorted.map((item, index) => ({ ...item, usage: index ? Math.max(0, item.reading - sorted[index - 1].reading) : 0, cost: index ? Math.max(0, item.reading - sorted[index - 1].reading) * RATE : 0 }));
-  }, [readings, period]);
+    return sorted.map((item, index) => ({ ...item, usage: index ? Math.max(0, item.reading - sorted[index - 1].reading) : 0, cost: index ? Math.max(0, item.reading - sorted[index - 1].reading) * rate : 0 }));
+  }, [readings, period, rate]);
   const latest = computed.at(-1) || { ...seed[0], usage: 0, cost: 0 };
   const previous = computed.at(-2);
   const baselineReading = computed[0]?.reading ?? latest.reading;
   const cycleUsage = Math.max(0, latest.reading - baselineReading);
-  const cycleCost = cycleUsage * RATE;
-  const recent = computed.filter((r) => r.usage > 0).slice(-7);
-  const rollingAverage = recent.length ? recent.reduce((sum, r) => sum + r.usage, 0) / recent.length : 0;
+  const cycleCost = cycleUsage * rate;
+  const normalizedDaily = computed.slice(1).map((item, index) => {
+    const previousItem = computed[index];
+    const hours = (new Date(`${item.date}T${item.time}`).getTime() - new Date(`${previousItem.date}T${previousItem.time}`).getTime()) / 3600000;
+    return { ...item, dailyRate: hours > 4 ? item.usage / hours * 24 : item.usage };
+  }).filter((item) => item.dailyRate > 0).slice(-10);
+  const rollingAverage = normalizedDaily.length ? normalizedDaily.reduce((sum, item) => sum + item.dailyRate, 0) / normalizedDaily.length : 0;
+  const forecastTomorrow = useMemo(() => {
+    if (!normalizedDaily.length) return 0;
+    const values = normalizedDaily.map((item) => item.dailyRate);
+    const weighted = values.reduce((sum, value, index) => sum + value * (index + 1), 0) / values.reduce((sum, _, index) => sum + index + 1, 0);
+    const xMean = (values.length - 1) / 2;
+    const yMean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const denominator = values.reduce((sum, _, index) => sum + (index - xMean) ** 2, 0);
+    const slope = denominator ? values.reduce((sum, value, index) => sum + (index - xMean) * (value - yMean), 0) / denominator : 0;
+    const trend = values.at(-1)! + slope;
+    const sorted = [...values].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    return Math.max(0, Math.min(median * 1.75, Math.max(median * .5, weighted * .72 + trend * .28)));
+  }, [computed]);
   const latestDate = new Date(`${latest.date}T12:00:00`);
   const periodEndDate = new Date(`${period.end}T12:00:00`);
   const remainingDays = Math.max(0, Math.ceil((periodEndDate.getTime() - latestDate.getTime()) / 86400000));
-  const projectedCost = (cycleUsage + rollingAverage * remainingDays) * RATE;
+  const projectedUsage = cycleUsage + forecastTomorrow * remainingDays;
+  const projectedCost = projectedUsage * rate;
   const change = previous?.usage ? ((latest.usage - previous.usage) / previous.usage) * 100 : 0;
-  const progress = Math.min(100, (cycleUsage / GOAL) * 100);
+  const periodStartDate = new Date(`${period.start}T12:00:00`);
+  const totalPeriodDays = Math.max(1, Math.ceil((periodEndDate.getTime() - periodStartDate.getTime()) / 86400000));
+  const elapsedPeriodDays = Math.max(0, Math.ceil((latestDate.getTime() - periodStartDate.getTime()) / 86400000));
+  const progress = Math.min(100, elapsedPeriodDays / totalPeriodDays * 100);
   const periodExpired = todayISO() > period.end;
   const periodLabel = `${new Date(`${period.start}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric" })} – ${new Date(`${period.end}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}`;
 
-  const openPeriod = () => { setPeriodForm(period); setModal("period"); };
+  const openPeriod = () => { setPeriodForm(period); setRateForm(String(rate)); setModal("period"); };
   const savePeriod = (event: FormEvent) => {
     event.preventDefault();
-    if (!periodForm.start || !periodForm.end || periodForm.end < periodForm.start) return;
-    setPeriod(periodForm); setPeriodConfigured(true); setModal(null);
+    const nextRate = Number(rateForm);
+    if (!periodForm.start || !periodForm.end || periodForm.end < periodForm.start || !Number.isFinite(nextRate) || nextRate <= 0) return;
+    setPeriod(periodForm); setRate(nextRate); setPeriodConfigured(true); setModal(null);
   };
 
   const openAdd = (reading = "") => { setEditing(null); setForm({ date: todayISO(), time: timeNow(), reading, notes: "" }); setModal("add"); };
@@ -182,12 +233,19 @@ export default function App() {
     if (!file || !file.type.startsWith("image/")) return;
     const objectUrl = URL.createObjectURL(file);
     setPreview(objectUrl); setOcrStatus("Preparing image…"); setOcrProgress(0.05); setForm({ date: todayISO(), time: timeNow(), reading: "", notes: "Scanned from meter photo" }); setModal("ocr");
+    let worker: Awaited<ReturnType<typeof createWorker>> | null = null;
     try {
-      const result = await recognize(file, "eng", { logger: (message) => { if (message.status) setOcrStatus(message.status.replace(/\b\w/g, (c) => c.toUpperCase())); if (message.progress) setOcrProgress(message.progress); } });
-      const candidates = result.data.text.match(/\d[\d\s,.]{3,8}\d/g)?.map((v) => v.replace(/\D/g, "")).filter((v) => v.length === 5) || [];
-      setForm((current) => ({ ...current, reading: candidates[0] || "" }));
-      setOcrStatus(candidates[0] ? "Reading found — please verify" : "No clear reading found — enter it below"); setOcrProgress(1);
+      const prepared = await prepareMeterImage(file);
+      worker = await createWorker("eng", 1, { logger: (message) => { if (message.status) setOcrStatus(message.status.replace(/\b\w/g, (character) => character.toUpperCase())); if (message.progress) setOcrProgress(message.progress); } });
+      await worker.setParameters({ tessedit_char_whitelist: "0123456789", tessedit_pageseg_mode: PSM.SPARSE_TEXT });
+      const result = await worker.recognize(prepared);
+      const groups = result.data.text.match(/\d+/g) || [];
+      const candidates = groups.flatMap((value) => value.length > 5 ? [value.slice(0, 5), value.slice(-5)] : [value]).filter((value) => value.length >= 4 && value.length <= 5);
+      const found = candidates.map(Number).filter(Number.isFinite).sort((a, b) => Math.abs(a - latest.reading) - Math.abs(b - latest.reading))[0];
+      setForm((current) => ({ ...current, reading: found === undefined ? "" : String(found) }));
+      setOcrStatus(found === undefined ? "No clear reading found — enter it below" : "Reading found — check the number before saving"); setOcrProgress(1);
     } catch { setOcrStatus("Scan could not finish — enter the reading below"); setOcrProgress(1); }
+    finally { await worker?.terminate(); }
   };
   const exportFile = (kind: "json" | "csv") => {
     const body = kind === "json" ? JSON.stringify(readings, null, 2) : ["Date,Time,Meter Reading,Daily Usage,Daily Cost,Notes", ...computed.map((r) => [r.date, r.time, r.reading, r.usage.toFixed(2), r.cost.toFixed(2), `"${r.notes.replaceAll('"', '""')}"`].join(","))].join("\n");
@@ -203,20 +261,20 @@ export default function App() {
   if (!user) return <AuthScreen />;
 
   return <main className="app-shell"><div className="grid-glow" /><div className="container">
-    <header className="topbar"><div className="brand"><span className="brand-mark"><Icon name="bolt" /></span><div><h1>Meralco kWh Tracker</h1><button className="period-link" onClick={openPeriod}>Billing period: {periodLabel}</button></div></div><div className="header-actions"><span className={`sync-pill ${syncState}`}><span /> {syncState === "synced" ? "Synced" : syncState === "error" ? "Sync error" : "Syncing…"}</span><span className="rate-pill"><span /> Rate {money.format(RATE)}/kWh</span><button className="account-button" onClick={() => signOut(auth)} title={user.email || "Signed in"}>Sign out</button><button className="primary small" onClick={() => openAdd()}><Icon name="plus" /> Add reading</button></div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark"><Icon name="bolt" /></span><div><h1>Meralco kWh Tracker</h1><button className="period-link" onClick={openPeriod}><span>Billing period</span>{periodLabel} <b>Manage</b></button></div></div><div className="header-actions"><span className={`sync-pill ${syncState}`}><span /> {syncState === "synced" ? "Synced" : syncState === "error" ? "Sync error" : "Syncing…"}</span><button className="rate-pill editable-rate" onClick={openPeriod} title="Edit electricity rate"><span /> {money.format(rate)}/kWh <b>Edit</b></button><button className="account-button" onClick={() => signOut(auth)} title={user.email || "Signed in"}>Sign out</button><button className="primary small" onClick={() => openAdd()}><Icon name="plus" /> Add reading</button></div></header>
     <section className="dashboard" aria-label="Current cycle summary">
       <article className="metric-card today-card"><div className="metric-icon cyan"><Icon name="chart" /></div><p className="kicker">Today's usage</p><h2>{number.format(latest.usage)} <small>kWh</small></h2><p className="metric-cost">{money.format(latest.cost)}</p><span className={`change ${change <= 0 ? "good" : "warn"}`}>{previous ? `${change > 0 ? "+" : ""}${change.toFixed(0)}% vs previous` : "First reading"}</span></article>
-      <article className="gauge-card"><div className="gauge" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}><div className="gauge-core"><p>Current reading</p><h2>{latest.reading.toLocaleString("en-PH")} <small>kWh</small></h2><span>{progress.toFixed(0)}% of {GOAL} kWh goal</span></div></div><div className="cycle-stats"><div><span>Cycle consumption</span><strong>{number.format(cycleUsage)} kWh</strong></div><i /><div><span>Running cycle cost</span><strong>{money.format(cycleCost)}</strong></div></div></article>
-      <article className="metric-card estimate-card"><div className="metric-icon green"><Icon name="trend" /></div><p className="kicker">Tomorrow est.</p><h2>{number.format(rollingAverage)} <small>kWh</small></h2><p className="metric-cost">{money.format(rollingAverage * RATE)}</p><span className="projection">Period-end est. <b>{money.format(projectedCost)}</b></span></article>
+      <article className="gauge-card"><div className="gauge" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}><div className="gauge-core"><p>Current reading</p><h2>{latest.reading.toLocaleString("en-PH")} <small>kWh</small></h2><span>Period-end estimate <b>{number.format(projectedUsage)} kWh</b></span></div></div><div className="cycle-stats"><div><span>Cycle consumption</span><strong>{number.format(cycleUsage)} kWh</strong></div><i /><div><span>Running cycle cost</span><strong>{money.format(cycleCost)}</strong></div></div></article>
+      <article className="metric-card estimate-card"><div className="metric-icon green"><Icon name="trend" /></div><p className="kicker">Tomorrow est.</p><h2>{number.format(forecastTomorrow)} <small>kWh</small></h2><p className="metric-cost">{money.format(forecastTomorrow * rate)}</p><span className="projection">Smart forecast <b>{normalizedDaily.length} readings</b></span></article>
     </section>
-    <section className="work-grid"><article className="panel upload-panel"><div className="section-title"><div><p className="kicker">Quick capture</p><h2>Scan your meter</h2></div><span>OCR powered</span></div><input ref={fileRef} hidden type="file" accept="image/*" onChange={(e) => scan(e.target.files?.[0])} /><input ref={cameraRef} hidden type="file" accept="image/*" capture="environment" onChange={(e) => scan(e.target.files?.[0])} /><div className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragging(false); scan(e.dataTransfer.files[0]); }}><span className="camera"><Icon name="camera" /></span><strong>Capture your meter reading</strong><small>Take a new photo or use one from your gallery</small><div className="capture-actions"><button type="button" className="outline-button camera-button" onClick={() => cameraRef.current?.click()}><Icon name="camera" /> Take photo</button><button type="button" className="outline-button" onClick={() => fileRef.current?.click()}><Icon name="upload" /> Choose photo</button></div></div></article>
-      <aside className="panel insight-panel"><div className="section-title"><div><p className="kicker">7-day signal</p><h2>Usage outlook</h2></div></div><div className="insight-number"><span>Daily average</span><strong>{number.format(rollingAverage)} kWh</strong></div><div className="mini-bars" aria-hidden="true">{(recent.length ? recent : [{usage:0}]).map((r, i) => <span key={i} style={{ height: `${Math.max(10, Math.min(100, r.usage / Math.max(...recent.map(x => x.usage), 1) * 100))}%` }} />)}</div><p>At this pace, your projected billing-period cost is <b>{money.format(projectedCost)}</b>.</p></aside></section>
+    <section className="work-grid"><article className="panel upload-panel"><div className="section-title"><div><p className="kicker">Quick capture</p><h2>Scan your meter</h2></div><span>Enhanced OCR</span></div><input ref={fileRef} hidden type="file" accept="image/*" onClick={(event) => { event.currentTarget.value = ""; }} onChange={(e) => scan(e.target.files?.[0])} /><input ref={cameraRef} hidden type="file" accept="image/*" capture="environment" onClick={(event) => { event.currentTarget.value = ""; }} onChange={(e) => scan(e.target.files?.[0])} /><div className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragging(false); scan(e.dataTransfer.files[0]); }}><span className="camera"><Icon name="camera" /></span><strong>Capture your meter reading</strong><small>For best results, fill the frame with the meter digits</small><div className="capture-actions"><button type="button" className="outline-button camera-button" onClick={() => cameraRef.current?.click()}><Icon name="camera" /> Open camera</button><button type="button" className="outline-button" onClick={() => fileRef.current?.click()}><Icon name="upload" /> Choose image</button></div></div></article>
+      <aside className="panel insight-panel"><div className="section-title"><div><p className="kicker">Recent normalized usage</p><h2>Usage outlook</h2></div><span className="scroll-hint">Scroll →</span></div><div className="insight-number"><span>24-hour average</span><strong>{number.format(rollingAverage)} kWh</strong></div><div className="usage-strip">{normalizedDaily.slice(-7).map((item) => <div className="usage-day" key={item.id}><div className="usage-bar"><i style={{ height: `${Math.max(12, Math.min(100, item.dailyRate / Math.max(...normalizedDaily.map((value) => value.dailyRate), 1) * 100))}%` }} /></div><strong>{number.format(item.dailyRate)}</strong><span>{new Date(`${item.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric" })}</span><small>{item.time}</small></div>)}</div><p>The forecast adjusts readings to 24 hours, weighs recent days more heavily, and accounts for the current trend. Period-end estimate: <b>{number.format(projectedUsage)} kWh · {money.format(projectedCost)}</b>.</p></aside></section>
     <section className="panel ledger"><div className="ledger-head"><div><p className="kicker">Consumption history</p><h2>Meter readings</h2><p>{computed.length} entries synced to your account</p></div><div className="ledger-actions"><button onClick={() => importRef.current?.click()}>Import JSON</button><input ref={importRef} hidden type="file" accept="application/json,.json" onChange={(e) => importJSON(e.target.files?.[0])}/><button onClick={() => exportFile("json")}><Icon name="download" /> JSON</button><button onClick={() => exportFile("csv")}><Icon name="download" /> CSV</button></div></div><div className="table-wrap"><table><thead><tr><th>Date & time</th><th>Meter reading</th><th>Daily usage</th><th>Daily cost</th><th>Notes</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{[...computed].reverse().map((r) => <tr key={r.id}><td><strong>{new Date(`${r.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}</strong><span>{r.time}</span></td><td>{r.reading.toLocaleString("en-PH")} <small>kWh</small></td><td className="usage">{r.id === computed[0]?.id ? "—" : `+${number.format(r.usage)} kWh`}</td><td>{r.id === computed[0]?.id ? "—" : money.format(r.cost)}</td><td className="notes">{r.notes || "—"}</td><td><div className="row-actions"><button onClick={() => openEdit(r)} aria-label="Edit reading"><Icon name="edit" /></button><button disabled={readings.length === 1} onClick={() => confirm("Delete this reading?") && setReadings((list) => list.filter((x) => x.id !== r.id))} aria-label="Delete reading"><Icon name="trash" /></button></div></td></tr>)}</tbody></table></div></section>
-    <footer>Calculated at {money.format(RATE)} per kWh · Synced securely with Firebase</footer>
+    <footer>Calculated at {money.format(rate)} per kWh · Synced securely with Firebase</footer>
   </div>
   {(modal === "add" || modal === "edit") && <Modal title={modal === "edit" ? "Edit reading" : "Add a reading"} onClose={() => setModal(null)}><ReadingForm form={form} setForm={setForm} submit={submit} label={modal === "edit" ? "Save changes" : "Add to log"} /></Modal>}
   {modal === "ocr" && <Modal title="Verify scanned reading" onClose={() => setModal(null)}><div className="scan-preview">{preview && <img src={preview} alt="Uploaded meter" />}<div className="scan-status"><span style={{ width: `${ocrProgress * 100}%` }} /></div><p>{ocrStatus}</p></div><ReadingForm form={form} setForm={setForm} submit={submit} label="Confirm & save" /></Modal>}
-  {modal === "period" && <Modal title={periodExpired ? "Start a new billing period" : periodConfigured ? "Edit billing period" : "Set your billing period"} onClose={() => periodConfigured && !periodExpired && setModal(null)}><form className="reading-form" onSubmit={savePeriod}><p className="period-help">Both dates are required. This form will stay out of the way during an active billing period and return only after its end date.</p><div className="field-row"><div className="field"><label htmlFor="period-start">Start date</label><input id="period-start" type="date" required value={periodForm.start} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, start: e.target.value }))}/></div><div className="field"><label htmlFor="period-end">End date</label><input id="period-end" type="date" required min={periodForm.start} value={periodForm.end} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, end: e.target.value }))}/></div></div><button className="primary modal-submit" type="submit">Save billing period</button></form></Modal>}
+  {modal === "period" && <Modal title={periodExpired ? "Start a new billing period" : periodConfigured ? "Billing settings" : "Set your billing period"} onClose={() => periodConfigured && !periodExpired && setModal(null)}><form className="reading-form" onSubmit={savePeriod}><p className="period-help">Set the dates shown on your bill and your current electricity price. Changes sync to every signed-in device.</p><div className="field-row"><div className="field"><label htmlFor="period-start">Billing start</label><input id="period-start" type="date" required value={periodForm.start} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, start: e.target.value }))}/></div><div className="field"><label htmlFor="period-end">Billing end</label><input id="period-end" type="date" required min={periodForm.start} value={periodForm.end} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, end: e.target.value }))}/></div></div><div className="field featured rate-field"><label htmlFor="rate">Electricity rate</label><div><span>₱</span><input id="rate" type="number" required min="0.0001" step="0.0001" inputMode="decimal" value={rateForm} onChange={(event) => setRateForm(event.target.value)} /><span>per kWh</span></div></div><button className="primary modal-submit" type="submit">Save billing settings</button></form></Modal>}
   </main>;
 }
 
