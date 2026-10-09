@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { recognize } from "tesseract.js";
+import { createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signOut, type User } from "firebase/auth";
+import { doc, getDoc, onSnapshot, setDoc } from "firebase/firestore";
+import { auth, db } from "./firebase";
 
 type Reading = { id: string; date: string; time: string; reading: number; notes: string };
 type ReadingWithUsage = Reading & { usage: number; cost: number };
@@ -82,6 +85,58 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement>(null);
   const cameraRef = useRef<HTMLInputElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [cloudReady, setCloudReady] = useState(false);
+  const [syncState, setSyncState] = useState<"connecting" | "synced" | "offline" | "error">("connecting");
+  const lastSyncedPayload = useRef("");
+
+  useEffect(() => onAuthStateChanged(auth, (nextUser) => {
+    setUser(nextUser);
+    setAuthReady(true);
+    setCloudReady(false);
+    setSyncState(nextUser ? "connecting" : "offline");
+  }), []);
+
+  useEffect(() => {
+    if (!user) return;
+    const stateRef = doc(db, "users", user.uid, "tracker", "state");
+    let unsubscribe = () => {};
+    getDoc(stateRef).then(async (snapshot) => {
+      if (!snapshot.exists()) {
+        await setDoc(stateRef, { readings, period, periodConfigured, updatedAt: Date.now() });
+      }
+      unsubscribe = onSnapshot(stateRef, { includeMetadataChanges: true }, (cloudSnapshot) => {
+        const data = cloudSnapshot.data();
+        if (data?.readings && Array.isArray(data.readings)) setReadings(data.readings as Reading[]);
+        if (data?.period?.start && data?.period?.end) {
+          setPeriod(data.period);
+          setPeriodForm(data.period);
+          setPeriodConfigured(data.periodConfigured !== false);
+        }
+        lastSyncedPayload.current = JSON.stringify({
+          readings: data?.readings || readings,
+          period: data?.period || period,
+          periodConfigured: data?.periodConfigured ?? periodConfigured,
+        });
+        setCloudReady(true);
+        setSyncState(cloudSnapshot.metadata.hasPendingWrites ? "connecting" : "synced");
+      }, () => setSyncState("error"));
+    }).catch(() => setSyncState("error"));
+    return () => unsubscribe();
+  }, [user]);
+
+  useEffect(() => {
+    if (!user || !cloudReady) return;
+    const payload = { readings, period, periodConfigured };
+    const serialized = JSON.stringify(payload);
+    if (serialized === lastSyncedPayload.current) return;
+    lastSyncedPayload.current = serialized;
+    setSyncState("connecting");
+    setDoc(doc(db, "users", user.uid, "tracker", "state"), { ...payload, updatedAt: Date.now() })
+      .then(() => setSyncState("synced"))
+      .catch(() => setSyncState("error"));
+  }, [readings, period, periodConfigured, user, cloudReady]);
 
   useEffect(() => localStorage.setItem(STORAGE_KEY, JSON.stringify(readings)), [readings]);
   useEffect(() => { if (periodConfigured) localStorage.setItem(PERIOD_KEY, JSON.stringify(period)); }, [period, periodConfigured]);
@@ -144,8 +199,11 @@ export default function App() {
     catch { alert("That file is not a valid Meralco Tracker JSON export."); }
   };
 
+  if (!authReady) return <main className="app-shell auth-shell"><div className="auth-card"><span className="brand-mark"><Icon name="bolt" /></span><h1>Meralco kWh Tracker</h1><p>Connecting securely…</p></div></main>;
+  if (!user) return <AuthScreen />;
+
   return <main className="app-shell"><div className="grid-glow" /><div className="container">
-    <header className="topbar"><div className="brand"><span className="brand-mark"><Icon name="bolt" /></span><div><h1>Meralco kWh Tracker</h1><button className="period-link" onClick={openPeriod}>Billing period: {periodLabel}</button></div></div><div className="header-actions"><span className="rate-pill"><span /> Rate {money.format(RATE)}/kWh</span><button className="primary small" onClick={() => openAdd()}><Icon name="plus" /> Add reading</button></div></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark"><Icon name="bolt" /></span><div><h1>Meralco kWh Tracker</h1><button className="period-link" onClick={openPeriod}>Billing period: {periodLabel}</button></div></div><div className="header-actions"><span className={`sync-pill ${syncState}`}><span /> {syncState === "synced" ? "Synced" : syncState === "error" ? "Sync error" : "Syncing…"}</span><span className="rate-pill"><span /> Rate {money.format(RATE)}/kWh</span><button className="account-button" onClick={() => signOut(auth)} title={user.email || "Signed in"}>Sign out</button><button className="primary small" onClick={() => openAdd()}><Icon name="plus" /> Add reading</button></div></header>
     <section className="dashboard" aria-label="Current cycle summary">
       <article className="metric-card today-card"><div className="metric-icon cyan"><Icon name="chart" /></div><p className="kicker">Today's usage</p><h2>{number.format(latest.usage)} <small>kWh</small></h2><p className="metric-cost">{money.format(latest.cost)}</p><span className={`change ${change <= 0 ? "good" : "warn"}`}>{previous ? `${change > 0 ? "+" : ""}${change.toFixed(0)}% vs previous` : "First reading"}</span></article>
       <article className="gauge-card"><div className="gauge" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}><div className="gauge-core"><p>Current reading</p><h2>{latest.reading.toLocaleString("en-PH")} <small>kWh</small></h2><span>{progress.toFixed(0)}% of {GOAL} kWh goal</span></div></div><div className="cycle-stats"><div><span>Cycle consumption</span><strong>{number.format(cycleUsage)} kWh</strong></div><i /><div><span>Running cycle cost</span><strong>{money.format(cycleCost)}</strong></div></div></article>
@@ -153,13 +211,36 @@ export default function App() {
     </section>
     <section className="work-grid"><article className="panel upload-panel"><div className="section-title"><div><p className="kicker">Quick capture</p><h2>Scan your meter</h2></div><span>OCR powered</span></div><input ref={fileRef} hidden type="file" accept="image/*" onChange={(e) => scan(e.target.files?.[0])} /><input ref={cameraRef} hidden type="file" accept="image/*" capture="environment" onChange={(e) => scan(e.target.files?.[0])} /><div className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragging(false); scan(e.dataTransfer.files[0]); }}><span className="camera"><Icon name="camera" /></span><strong>Capture your meter reading</strong><small>Take a new photo or use one from your gallery</small><div className="capture-actions"><button type="button" className="outline-button camera-button" onClick={() => cameraRef.current?.click()}><Icon name="camera" /> Take photo</button><button type="button" className="outline-button" onClick={() => fileRef.current?.click()}><Icon name="upload" /> Choose photo</button></div></div></article>
       <aside className="panel insight-panel"><div className="section-title"><div><p className="kicker">7-day signal</p><h2>Usage outlook</h2></div></div><div className="insight-number"><span>Daily average</span><strong>{number.format(rollingAverage)} kWh</strong></div><div className="mini-bars" aria-hidden="true">{(recent.length ? recent : [{usage:0}]).map((r, i) => <span key={i} style={{ height: `${Math.max(10, Math.min(100, r.usage / Math.max(...recent.map(x => x.usage), 1) * 100))}%` }} />)}</div><p>At this pace, your projected billing-period cost is <b>{money.format(projectedCost)}</b>.</p></aside></section>
-    <section className="panel ledger"><div className="ledger-head"><div><p className="kicker">Consumption history</p><h2>Meter readings</h2><p>{computed.length} entries saved on this device</p></div><div className="ledger-actions"><button onClick={() => importRef.current?.click()}>Import JSON</button><input ref={importRef} hidden type="file" accept="application/json,.json" onChange={(e) => importJSON(e.target.files?.[0])}/><button onClick={() => exportFile("json")}><Icon name="download" /> JSON</button><button onClick={() => exportFile("csv")}><Icon name="download" /> CSV</button></div></div><div className="table-wrap"><table><thead><tr><th>Date & time</th><th>Meter reading</th><th>Daily usage</th><th>Daily cost</th><th>Notes</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{[...computed].reverse().map((r) => <tr key={r.id}><td><strong>{new Date(`${r.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}</strong><span>{r.time}</span></td><td>{r.reading.toLocaleString("en-PH")} <small>kWh</small></td><td className="usage">{r.id === computed[0]?.id ? "—" : `+${number.format(r.usage)} kWh`}</td><td>{r.id === computed[0]?.id ? "—" : money.format(r.cost)}</td><td className="notes">{r.notes || "—"}</td><td><div className="row-actions"><button onClick={() => openEdit(r)} aria-label="Edit reading"><Icon name="edit" /></button><button disabled={readings.length === 1} onClick={() => confirm("Delete this reading?") && setReadings((list) => list.filter((x) => x.id !== r.id))} aria-label="Delete reading"><Icon name="trash" /></button></div></td></tr>)}</tbody></table></div></section>
-    <footer>Calculated at {money.format(RATE)} per kWh · Data stays in your browser</footer>
+    <section className="panel ledger"><div className="ledger-head"><div><p className="kicker">Consumption history</p><h2>Meter readings</h2><p>{computed.length} entries synced to your account</p></div><div className="ledger-actions"><button onClick={() => importRef.current?.click()}>Import JSON</button><input ref={importRef} hidden type="file" accept="application/json,.json" onChange={(e) => importJSON(e.target.files?.[0])}/><button onClick={() => exportFile("json")}><Icon name="download" /> JSON</button><button onClick={() => exportFile("csv")}><Icon name="download" /> CSV</button></div></div><div className="table-wrap"><table><thead><tr><th>Date & time</th><th>Meter reading</th><th>Daily usage</th><th>Daily cost</th><th>Notes</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{[...computed].reverse().map((r) => <tr key={r.id}><td><strong>{new Date(`${r.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}</strong><span>{r.time}</span></td><td>{r.reading.toLocaleString("en-PH")} <small>kWh</small></td><td className="usage">{r.id === computed[0]?.id ? "—" : `+${number.format(r.usage)} kWh`}</td><td>{r.id === computed[0]?.id ? "—" : money.format(r.cost)}</td><td className="notes">{r.notes || "—"}</td><td><div className="row-actions"><button onClick={() => openEdit(r)} aria-label="Edit reading"><Icon name="edit" /></button><button disabled={readings.length === 1} onClick={() => confirm("Delete this reading?") && setReadings((list) => list.filter((x) => x.id !== r.id))} aria-label="Delete reading"><Icon name="trash" /></button></div></td></tr>)}</tbody></table></div></section>
+    <footer>Calculated at {money.format(RATE)} per kWh · Synced securely with Firebase</footer>
   </div>
   {(modal === "add" || modal === "edit") && <Modal title={modal === "edit" ? "Edit reading" : "Add a reading"} onClose={() => setModal(null)}><ReadingForm form={form} setForm={setForm} submit={submit} label={modal === "edit" ? "Save changes" : "Add to log"} /></Modal>}
   {modal === "ocr" && <Modal title="Verify scanned reading" onClose={() => setModal(null)}><div className="scan-preview">{preview && <img src={preview} alt="Uploaded meter" />}<div className="scan-status"><span style={{ width: `${ocrProgress * 100}%` }} /></div><p>{ocrStatus}</p></div><ReadingForm form={form} setForm={setForm} submit={submit} label="Confirm & save" /></Modal>}
   {modal === "period" && <Modal title={periodExpired ? "Start a new billing period" : periodConfigured ? "Edit billing period" : "Set your billing period"} onClose={() => periodConfigured && !periodExpired && setModal(null)}><form className="reading-form" onSubmit={savePeriod}><p className="period-help">Both dates are required. This form will stay out of the way during an active billing period and return only after its end date.</p><div className="field-row"><div className="field"><label htmlFor="period-start">Start date</label><input id="period-start" type="date" required value={periodForm.start} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, start: e.target.value }))}/></div><div className="field"><label htmlFor="period-end">End date</label><input id="period-end" type="date" required min={periodForm.start} value={periodForm.end} onChange={(e) => setPeriodForm((value: typeof DEFAULT_PERIOD) => ({ ...value, end: e.target.value }))}/></div></div><button className="primary modal-submit" type="submit">Save billing period</button></form></Modal>}
   </main>;
+}
+
+function AuthScreen() {
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const authenticate = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      if (mode === "signup") await createUserWithEmailAndPassword(auth, email, password);
+      else await signInWithEmailAndPassword(auth, email, password);
+    } catch (reason) {
+      const code = (reason as { code?: string }).code || "";
+      setError(code.includes("invalid-credential") ? "Incorrect email or password." : code.includes("email-already-in-use") ? "That email already has an account. Sign in instead." : code.includes("weak-password") ? "Use a password with at least 6 characters." : "Could not continue. Check Firebase setup and try again.");
+    } finally { setBusy(false); }
+  };
+
+  return <main className="app-shell auth-shell"><div className="grid-glow" /><section className="auth-card"><span className="brand-mark"><Icon name="bolt" /></span><p className="kicker">Private cloud sync</p><h1>Meralco kWh Tracker</h1><p>Use the same account on every device to keep readings synchronized.</p><form className="reading-form auth-form" onSubmit={authenticate}><div className="field"><label htmlFor="auth-email">Email</label><input id="auth-email" type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></div><div className="field"><label htmlFor="auth-password">Password</label><input id="auth-password" type="password" required minLength={6} autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} /></div>{error && <p className="auth-error">{error}</p>}<button className="primary modal-submit" disabled={busy}>{busy ? "Please wait…" : mode === "signup" ? "Create account" : "Sign in"}</button></form><button className="auth-switch" onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setError(""); }}>{mode === "signin" ? "First time? Create an account" : "Already have an account? Sign in"}</button></section></main>;
 }
 
 function ReadingForm({ form, setForm, submit, label }: { form: { date: string; time: string; reading: string; notes: string }; setForm: React.Dispatch<React.SetStateAction<{ date: string; time: string; reading: string; notes: string }>>; submit: (e: FormEvent) => void; label: string }) {
