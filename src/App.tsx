@@ -3,6 +3,7 @@ import { createWorker, PSM } from "tesseract.js";
 import { createUserWithEmailAndPassword, onAuthStateChanged, reload, sendEmailVerification, sendPasswordResetEmail, signInWithEmailAndPassword, signOut, type User } from "firebase/auth";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
+import AccountPanel, { Dialog, Legal, GuidedTour } from "./Experience";
 import { accountRecordState, createAccountLease } from "./account-policy.mjs";
 
 type Reading = { id: string; date: string; time: string; reading: number; notes: string };
@@ -67,25 +68,19 @@ function Icon({ name, className = "" }: { name: string; className?: string }) {
 }
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => event.key === "Escape" && onClose();
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [onClose]);
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-    <section className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-      <div className="modal-head"><div><p className="kicker">Meter tracker</p><h2 id="modal-title">{title}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><Icon name="close" /></button></div>
-      {children}
-    </section>
-  </div>;
+  return <Dialog title={title} onClose={onClose}>{children}</Dialog>;
 }
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
   const [access, setAccess] = useState(false);
+  const [profile, setProfile] = useState(false);
+  const activeUid = useRef<string | null>(null);
   const [, refresh] = useState(0);
   useEffect(() => onAuthStateChanged(auth, (next) => {
+    if (activeUid.current !== (next?.uid || null)) setProfile(false);
+    activeUid.current = next?.uid || null;
     setUser(next);
     setReady(true);
     setAccess(false);
@@ -93,10 +88,11 @@ export default function App() {
   if (!ready) return <main className="auth-shell app-shell"><p>Opening your tracker…</p></main>;
   if (user && !user.emailVerified) return <VerifyEmailScreen user={user} onVerified={() => refresh((value) => value + 1)} />;
   if (!user && access) return <AuthScreen onDemo={() => setAccess(false)} />;
-  return <Tracker key={user?.uid || "public-demo"} user={user} onSignIn={() => setAccess(true)} />;
+  if (user && profile) return <AccountPanel user={user} onClose={() => setProfile(false)} />;
+  return <Tracker onProfile={() => setProfile(true)} key={user?.uid || "public-demo"} user={user} onSignIn={() => setAccess(true)} />;
 }
 
-function Tracker({ user, onSignIn }: { user: User | null; onSignIn: () => void }) {
+function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: () => void; onProfile: () => void }) {
   const guestMode = !user;
   const [readings, setReadings] = useState<Reading[]>(() => guestMode ? seed.map((item) => ({ ...item })) : []);
   const [periodConfigured, setPeriodConfigured] = useState(guestMode);
@@ -105,6 +101,8 @@ function Tracker({ user, onSignIn }: { user: User | null; onSignIn: () => void }
   const [periodForm, setPeriodForm] = useState(period);
   const [rateForm, setRateForm] = useState(String(rate));
   const [modal, setModal] = useState<"add" | "edit" | "ocr" | "period" | null>(null);
+  const deletionObserved = useRef(false);
+  const [legal, setLegal] = useState<"terms" | "privacy" | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const [editing, setEditing] = useState<Reading | null>(null);
   const [form, setForm] = useState({ date: todayISO(), time: timeNow(), reading: "", notes: "" });
@@ -130,6 +128,7 @@ function Tracker({ user, onSignIn }: { user: User | null; onSignIn: () => void }
       if (!lease.valid()) return;
       if (!snapshot.exists() && snapshot.metadata.fromCache) return;
       const data = snapshot.data();
+      if (data?.deleting || deletionObserved.current) { deletionObserved.current = true; setCloudReady(false); return; }
       const ownership = accountRecordState(user.uid, data);
       if (ownership === "blocked") { setSyncState("error"); setCloudReady(false); return; }
       if (ownership === "review") { setOldRecords(data); setCloudReady(false); return; }
@@ -157,7 +156,7 @@ function Tracker({ user, onSignIn }: { user: User | null; onSignIn: () => void }
   }, [user]);
 
   useEffect(() => {
-    if (!user || !user.emailVerified || !cloudReady || guestMode || auth.currentUser?.uid !== user.uid) return;
+    if (deletionObserved.current || !user || !user.emailVerified || !cloudReady || guestMode || auth.currentUser?.uid !== user.uid) return;
     const payload = { readings, period, periodConfigured, rate };
     const serialized = JSON.stringify(payload);
     if (serialized === lastSavedPayload.current) return;
@@ -302,13 +301,15 @@ function Tracker({ user, onSignIn }: { user: User | null; onSignIn: () => void }
     finally { setReviewBusy(false); }
   };
   if (oldRecords) return <main className="app-shell auth-shell"><section className="auth-card"><p className="kicker">One-time account check</p><h1>Let’s keep your readings separate.</h1><p>You’re signed in as <strong>{user?.email}</strong>.</p><p>An earlier version may have copied readings between accounts on this device. Choose whether the old readings belong here.</p><p>{oldRecords.readings?.length || 0} readings found. Starting fresh keeps a private recovery copy.</p>{syncState === "error" && <p role="alert">We couldn’t save your choice. Please try again.</p>}<button className="primary modal-submit" disabled={reviewBusy} onClick={() => reviewOldRecords(false)}>Start this account fresh</button><button className="account-button modal-submit" disabled={reviewBusy} onClick={() => reviewOldRecords(true)}>These readings are mine — keep them</button><button className="account-button modal-submit" onClick={() => signOut(auth)}>Sign out</button></section></main>;
+  if (deletionObserved.current) return <main className="app-shell auth-shell"><section className="auth-card"><h1>Account deletion in progress</h1><p>Finish deleting your account on the device where you started. Saving is paused here.</p><button className="primary" onClick={onProfile}>Continue account deletion</button></section></main>;
   if (!cloudReady) return <main className="app-shell auth-shell"><section className="auth-card"><h1>{syncState === "error" ? "We couldn’t open your readings" : "Opening your readings…"}</h1><p>{user?.email}</p><p>{syncState === "error" ? "Check your connection and try again." : "Please wait while we open this account."}</p><button className="primary" onClick={() => window.location.reload()}>Try again</button><button className="account-button" onClick={() => signOut(auth)}>Sign out</button></section></main>;
 
   return <main className="app-shell"><div className="grid-glow" /><div className="container">
-    <div className="welcome-bar"><span className="wordmark">MERALPON<span> / electricity, understood</span></span><button className="account-button" onClick={() => setShowHelp(true)}>How it works</button></div>
+    <div className="welcome-bar"><span className="wordmark">MERALPON<span> / electricity, understood</span></span><div className="welcome-actions"><button className="account-button" onClick={() => setShowHelp(true)}>How it works</button>{user && <button className="profile-pill" onClick={onProfile}><span>{(user.displayName || user.email || "U").slice(0, 1).toUpperCase()}</span>My account</button>}</div></div>
     {guestMode ? <section className="demo-welcome"><div><p className="kicker">Try it before you join</p><h2>A clearer view of your electricity.</h2><p>Explore this sample, change a reading, and see your estimated bill update. Your changes here are temporary.</p></div><button className="primary" onClick={onSignIn}>Sign in / Create account</button></section> : <div className="account-context">Your private tracker <strong>{user?.email}</strong></div>}
     {!guestMode && (!periodConfigured || periodExpired) && <section className="setup-notice"><div><strong>{periodExpired && periodConfigured ? "Ready for your next bill?" : "Start with your bill dates"}</strong><p>Choose your dates and price per kWh, then add your first meter reading.</p></div><button className="primary" onClick={openPeriod}>Set up my tracker</button></section>}
     {!guestMode && !readings.length && periodConfigured && <section className="setup-notice"><div><strong>No readings yet</strong><p>Add the meter number from the first day of your bill. This is your starting point.</p></div><button className="primary" onClick={() => openAdd()}>Add first reading</button></section>}
+    {legal && <Legal type={legal} onClose={() => setLegal(null)} />}
     {showHelp && <Tutorial onClose={() => setShowHelp(false)} onDemo={() => setShowHelp(false)} />}
     <header className="topbar"><div className="brand"><span className="brand-mark"><Icon name="bolt" /></span><div><h1>Meralco kWh Tracker</h1><button className="period-link" onClick={openPeriod}><span>Billing period</span>{periodLabel} <b>Manage</b></button></div></div><div className="header-actions"><span className={`sync-pill ${guestMode ? "demo" : syncState}`}><span /> {guestMode ? "Sample" : syncState === "synced" ? "Saved" : syncState === "error" ? "Couldn’t save" : syncState === "offline" ? "Waiting for internet" : "Saving…"}</span><button className="rate-pill editable-rate" onClick={openPeriod} title="Edit electricity rate"><span /> {money.format(rate)}/kWh <b>Edit</b></button><button className="account-button" onClick={() => guestMode ? onSignIn() : signOut(auth)} title={guestMode ? "Return to sign in" : user?.email || "Signed in"}>{guestMode ? "Sign in" : "Sign out"}</button><button className="primary small" onClick={() => openAdd()}><Icon name="plus" /> Add reading</button></div></header>
     <section className="dashboard" aria-label="Your electricity summary">
@@ -319,7 +320,7 @@ function Tracker({ user, onSignIn }: { user: User | null; onSignIn: () => void }
     <section className="work-grid"><article className="panel upload-panel"><div className="section-title"><div><p className="kicker">Add a photo</p><h2>Read a meter photo</h2></div><span>Photo reader</span></div><input ref={fileRef} hidden type="file" accept="image/*" onClick={(event) => { event.currentTarget.value = ""; }} onChange={(e) => scan(e.target.files?.[0])} /><input ref={cameraRef} hidden type="file" accept="image/*" capture="environment" onClick={(event) => { event.currentTarget.value = ""; }} onChange={(e) => scan(e.target.files?.[0])} /><div className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragging(false); scan(e.dataTransfer.files[0]); }}><span className="camera"><Icon name="camera" /></span><strong>Capture your meter reading</strong><small>For best results, fill the frame with the meter digits</small><div className="capture-actions"><button type="button" className="outline-button camera-button" onClick={() => cameraRef.current?.click()}><Icon name="camera" /> Open camera</button><button type="button" className="outline-button" onClick={() => fileRef.current?.click()}><Icon name="upload" /> Choose image</button></div></div></article>
       <aside className="panel insight-panel"><div className="section-title"><div><p className="kicker">Complete billing period</p><h2>Usage outlook</h2></div><span className="scroll-hint">Scroll →</span></div><div className="insight-number"><span>Recent daily average</span><strong>{wholeNumber.format(rollingAverage)} kWh</strong></div><div className="usage-strip">{computed.map((item, index) => <div className="usage-day" key={item.id}><div className="usage-bar"><i style={{ height: `${index === 0 ? 8 : Math.max(12, Math.min(100, item.usage / Math.max(...computed.map((value) => value.usage), 1) * 100))}%` }} /></div><strong>{index === 0 ? "Start" : `${wholeNumber.format(item.usage)} kWh`}</strong><span>{new Date(`${item.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric" })}</span><small>{item.time}</small></div>)}</div><p>Every logged date is shown from the billing-period start. Estimated final meter reading: <b>{wholeNumber.format(projectedMeterReading)} kWh</b> with an estimated bill of <b>{money.format(projectedCost)}</b>.</p></aside></section>
     <section className="panel ledger"><div className="ledger-head"><div><p className="kicker">Meter history</p><h2>Meter readings</h2><p>{computed.length} {guestMode ? "sample readings · changes are temporary" : "readings saved to this account"}</p></div><div className="ledger-actions"><button onClick={() => importRef.current?.click()}>Restore backup</button><input ref={importRef} hidden type="file" accept="application/json,.json" onChange={(e) => importJSON(e.target.files?.[0])}/><button onClick={() => exportFile("json")}><Icon name="download" /> Save backup</button><button onClick={() => exportFile("csv")}><Icon name="download" /> Spreadsheet</button></div></div><div className="table-wrap"><table><thead><tr><th>Date & time</th><th>Meter reading</th><th>Daily usage</th><th>Daily cost</th><th>Notes</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{[...computed].reverse().map((r) => <tr key={r.id}><td><strong>{new Date(`${r.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}</strong><span>{r.time}</span></td><td>{r.reading.toLocaleString("en-PH")} <small>kWh</small></td><td className="usage">{r.id === computed[0]?.id ? "—" : `+${number.format(r.usage)} kWh`}</td><td>{r.id === computed[0]?.id ? "—" : money.format(r.cost)}</td><td className="notes">{r.notes || "—"}</td><td><div className="row-actions"><button onClick={() => openEdit(r)} aria-label="Edit reading"><Icon name="edit" /></button><button disabled={readings.length === 1} onClick={() => confirm("Delete this reading?") && setReadings((list) => list.filter((x) => x.id !== r.id))} aria-label="Delete reading"><Icon name="trash" /></button></div></td></tr>)}</tbody></table></div></section>
-    <footer>{guestMode ? "Sample dashboard · No account needed · Changes are temporary" : "Your readings are private to your account"}<br />Estimated at {money.format(rate)} per kWh. Your actual bill may include other charges.</footer>
+    <footer>{guestMode ? "Sample dashboard · No account needed · Changes are temporary" : "Your readings are private to your account"}<br />Estimated at {money.format(rate)} per kWh. Your actual bill may include other charges.<div className="policy-links"><button onClick={() => setLegal("terms")}>Terms of use</button><button onClick={() => setLegal("privacy")}>Privacy notice</button></div></footer>
   </div>
   {(modal === "add" || modal === "edit") && <Modal title={modal === "edit" ? "Edit reading" : "Add a reading"} onClose={() => setModal(null)}><ReadingForm form={form} setForm={setForm} submit={submit} label={modal === "edit" ? "Save changes" : "Add to log"} /></Modal>}
   {modal === "ocr" && <Modal title="Check the number" onClose={() => setModal(null)}><div className="scan-preview">{preview && <img src={preview} alt="Uploaded meter" />}<div className="scan-status"><span style={{ width: `${ocrProgress * 100}%` }} /></div><p>{ocrStatus}</p></div><ReadingForm form={form} setForm={setForm} submit={submit} label="Confirm & save" /></Modal>}
@@ -352,7 +353,7 @@ function VerifyEmailScreen({ user, onVerified }: { user: User; onVerified: () =>
 }
 
 function Tutorial({ onClose, onDemo }: { onClose: () => void; onDemo: () => void }) {
-  return <div className="modal-backdrop tutorial-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title"><div className="modal-head"><div><p className="kicker">Getting started</p><h2 id="tutorial-title">How the tracker works</h2></div><button className="icon-button" onClick={onClose} aria-label="Close tutorial"><Icon name="close" /></button></div><div className="tutorial-steps"><article><span>1</span><div><h3>Set your bill dates</h3><p>Enter the start and end dates from your Meralco bill, plus your current peso rate per kWh.</p></div></article><article><span>2</span><div><h3>Add meter readings</h3><p>Type a reading or photograph the meter. Always verify the number before saving.</p></div></article><article><span>3</span><div><h3>See what your next bill could be</h3><p>The dashboard calculates daily usage, running cost, tomorrow’s estimate, and the likely final meter reading.</p></div></article><article><span>4</span><div><h3>Use it on your other devices</h3><p>Sign into the same account on another device and your real readings will appear automatically.</p></div></article></div><button className="primary modal-submit" onClick={onDemo}>Got it</button></section></div>;
+  return <GuidedTour onClose={onClose} />;
 }
 
 function AuthScreen({ onDemo }: { onDemo: () => void }) {
@@ -364,10 +365,13 @@ function AuthScreen({ onDemo }: { onDemo: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [accepted, setAccepted] = useState(false);
+  const [legal, setLegal] = useState<"terms" | "privacy" | null>(null);
   const [showTutorial, setShowTutorial] = useState(false);
 
   const authenticate = async (event: FormEvent) => {
     event.preventDefault();
+    if (mode === "signup" && !accepted) { setError("Please read and accept the terms and privacy notice."); return; }
     if (mode === "signup" && password !== confirmPassword) {
       setError("The passwords do not match.");
       return;
@@ -409,7 +413,7 @@ function AuthScreen({ onDemo }: { onDemo: () => void }) {
     setNotice("");
   };
 
-  return <main className="app-shell auth-shell"><div className="grid-glow" /><section className="auth-card"><div className="auth-brand"><span className="brand-mark"><Icon name="bolt" /></span><div><p className="kicker">Your electricity, in one place</p><h1>Meralco Tracker</h1></div></div><p className="auth-intro">Your readings, billing period, and estimates—saved to your account on every device.</p><div className="auth-tabs" role="tablist" aria-label="Account access"><button type="button" role="tab" aria-selected={mode === "signin"} className={mode === "signin" ? "active" : ""} onClick={() => changeMode("signin")}>Sign in</button><button type="button" role="tab" aria-selected={mode === "signup"} className={mode === "signup" ? "active" : ""} onClick={() => changeMode("signup")}>Create account</button></div><form className="reading-form auth-form" onSubmit={authenticate}><div className="field"><label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></div><div className="field"><div className="password-label"><label htmlFor="auth-password">Password</label>{mode === "signin" && <button type="button" onClick={resetPassword}>Forgot password?</button>}</div><div className="password-input"><input id="auth-password" type={showPassword ? "text" : "password"} required minLength={6} autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={mode === "signup" ? "At least 6 characters" : "Enter your password"}/><button type="button" onClick={() => setShowPassword((shown) => !shown)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></div></div>{mode === "signup" && <div className="field"><label htmlFor="auth-confirm-password">Confirm password</label><div className="password-input"><input id="auth-confirm-password" type={showPassword ? "text" : "password"} required minLength={6} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Enter it again"/></div></div>}{error && <p className="auth-error">{error}</p>}{notice && <p className="auth-notice">{notice}</p>}<button className="primary modal-submit auth-submit" disabled={busy}>{busy ? "Please wait…" : mode === "signup" ? "Create account" : "Sign in to dashboard"}</button></form><div className="guest-actions"><button type="button" onClick={onDemo}>Back to sample dashboard</button><button type="button" onClick={() => setShowTutorial(true)}>How it works</button></div><p className="auth-security">Your readings are private to your account.</p></section>{showTutorial && <Tutorial onClose={() => setShowTutorial(false)} onDemo={() => { setShowTutorial(false); onDemo(); }} />}</main>;
+  return <main className="app-shell auth-shell"><div className="grid-glow" /><section className="auth-card"><div className="auth-brand"><span className="brand-mark"><Icon name="bolt" /></span><div><p className="kicker">Your electricity, in one place</p><h1>Meralco Tracker</h1></div></div><p className="auth-intro">Your readings, billing period, and estimates—saved to your account on every device.</p><div className="auth-tabs" role="tablist" aria-label="Account access"><button type="button" role="tab" aria-selected={mode === "signin"} className={mode === "signin" ? "active" : ""} onClick={() => changeMode("signin")}>Sign in</button><button type="button" role="tab" aria-selected={mode === "signup"} className={mode === "signup" ? "active" : ""} onClick={() => changeMode("signup")}>Create account</button></div><form className="reading-form auth-form" onSubmit={authenticate}><div className="field"><label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></div><div className="field"><div className="password-label"><label htmlFor="auth-password">Password</label>{mode === "signin" && <button type="button" onClick={resetPassword}>Forgot password?</button>}</div><div className="password-input"><input id="auth-password" type={showPassword ? "text" : "password"} required minLength={6} autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={mode === "signup" ? "At least 6 characters" : "Enter your password"}/><button type="button" onClick={() => setShowPassword((shown) => !shown)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></div></div>{mode === "signup" && <div className="field"><label htmlFor="auth-confirm-password">Confirm password</label><div className="password-input"><input id="auth-confirm-password" type={showPassword ? "text" : "password"} required minLength={6} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Enter it again"/></div></div>}{mode === "signup" && <div className="consent"><label><input type="checkbox" required checked={accepted} onChange={(e) => setAccepted(e.target.checked)} /> I agree to the terms of use and have read the privacy notice.</label><div className="policy-links"><button type="button" onClick={() => setLegal("terms")}>Read terms</button><button type="button" onClick={() => setLegal("privacy")}>Read privacy notice</button></div></div>}{error && <p className="auth-error">{error}</p>}{notice && <p className="auth-notice">{notice}</p>}<button className="primary modal-submit auth-submit" disabled={busy}>{busy ? "Please wait…" : mode === "signup" ? "Create account" : "Sign in to dashboard"}</button></form><div className="guest-actions"><button type="button" onClick={onDemo}>Back to sample dashboard</button><button type="button" onClick={() => setShowTutorial(true)}>How it works</button></div><p className="auth-security">Your readings are private to your account.</p></section>{legal && <Legal type={legal} onClose={() => setLegal(null)} />}{showTutorial && <Tutorial onClose={() => setShowTutorial(false)} onDemo={() => { setShowTutorial(false); onDemo(); }} />}</main>;
 }
 
 function ReadingForm({ form, setForm, submit, label }: { form: { date: string; time: string; reading: string; notes: string }; setForm: React.Dispatch<React.SetStateAction<{ date: string; time: string; reading: string; notes: string }>>; submit: (e: FormEvent) => void; label: string }) {
