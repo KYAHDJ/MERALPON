@@ -1,5 +1,8 @@
 {
-  "description": "Track and manage your electricity consumption effortlessly with an intuitive interface that visualizes usage, costs, and future estimates.",
+  "title": "Meralpon · Electricity tracker",
+  "description": "Log your electricity meter readings, see daily usage, and estimate your next bill.",
+  "icons": { "icon": "favicon.svg" },
+  "openGraph": { "image": "https://kyahdj.github.io/MERALPON/og-image.png" },
   "robots": {
     "index": false
   },
