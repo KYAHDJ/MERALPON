@@ -77,14 +77,16 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [ready, setReady] = useState(false);
+  // Returning users wait for the sign-in check; everyone else sees the sample at once.
+  const [ready, setReady] = useState(() => { try { return !localStorage.getItem("meralpon-returning"); } catch { return false; } });
   const [access, setAccess] = useState(false);
   const [profile, setProfile] = useState(false);
   const activeUid = useRef<string | null>(null);
   const [, refresh] = useState(0);
   useEffect(() => onAuthStateChanged(auth, (next) => {
-    if (activeUid.current !== (next?.uid || null)) setProfile(false);
+    if (activeUid.current !== (next?.uid || null)) { setProfile(false); setAccess(false); }
     activeUid.current = next?.uid || null;
+    try { next ? localStorage.setItem("meralpon-returning", "1") : localStorage.removeItem("meralpon-returning"); } catch { /* storage blocked: fall back to waiting */ }
     setUser(next);
     setReady(true);
     setAccess(false);
