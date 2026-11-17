@@ -41,3 +41,28 @@ body{font-feature-settings:"tnum" 0}
 @keyframes fill{from{transform:scaleX(0)}}@keyframes grow{from{transform:scaleY(0)}}
 @media(max-width:900px){.hero{grid-template-columns:1fr}.hero-side{grid-template-columns:1fr 1fr}}
 @media(max-width:640px){.container{width:calc(100% - 28px)}.bar{flex-direction:column;align-items:stretch;gap:14px;padding:16px 0}.bar-actions{justify-content:flex-start}.sample-strip,.scan{flex-direction:column;align-items:stretch}.hero-main{padding:22px}.hero-side{grid-template-columns:1fr}.hero-stats{gap:10px}.hero-stats dd{font-size:16px}.scan .capture-actions{width:100%}.scan .capture-actions button{flex:1;justify-content:center}.sample-strip .primary{width:100%}}
+/* Sign-in, verify and account pages match the dashboard. */
+.auth-shell{padding:24px 16px}
+.auth-card{width:min(440px,100%);border:1px solid var(--line);border-top:1px solid var(--line);border-radius:20px;padding:36px;background:var(--surface);box-shadow:0 24px 60px -24px #000a}
+.auth-card h1{font-size:28px;font-weight:700;letter-spacing:-.03em}
+.auth-brand h1{font-size:26px}.auth-card .auth-intro{margin:20px 0 24px;font-size:14px}
+.auth-card .field input,.profile-page .field input{min-height:46px;border-radius:12px}
+.auth-tabs{border-radius:14px;background:#0f1822}.auth-tabs button{border-radius:10px;font-size:13px;font-weight:700}
+.auth-card .primary,.profile-page .primary{min-height:46px;border-radius:12px}
+.verify-icon{border-radius:16px;background:#254136;border:0;color:var(--accent)}
+.profile-shell{padding:24px 16px 48px}.profile-page{width:min(960px,100%)}
+.back-link{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:0 16px;background:var(--surface);color:#d3deea;font-weight:600}.back-link:hover{border-color:var(--accent)}
+.profile-heading h1{font-weight:700;letter-spacing:-.03em}.profile-avatar{border-radius:20px}
+@media(max-width:640px){.auth-card{padding:26px 20px}.auth-card h1{font-size:24px}.profile-heading{gap:14px}}
+/* Meter readings: cards on phones, table on larger screens. */
+@media(max-width:700px){
+  .ledger .table-wrap{padding:0 14px 6px;overflow:visible}
+  .ledger table{display:block;min-width:0}.ledger thead{display:none}.ledger tbody{display:grid;gap:12px}
+  .ledger tr{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;border:1px solid var(--line);border-radius:14px;padding:16px;background:#101a26}
+  .ledger td{display:block;min-width:0;border:0;padding:0;background:none!important}
+  .ledger td[data-label]:before{content:attr(data-label);display:block;margin-bottom:3px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+  .ledger td[data-label="Date"],.ledger td.notes{grid-column:1/-1}
+  .ledger td.notes{max-width:none}
+  .ledger .row-cell{grid-column:1/-1;padding-top:6px;border-top:1px solid var(--line)}.ledger .row-actions{justify-content:flex-end}
+}
+@media(max-width:380px){.auth-tabs button{padding:10px 4px;font-size:12px;white-space:nowrap}}
