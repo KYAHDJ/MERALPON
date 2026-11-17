@@ -103,6 +103,7 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
   const guestMode = !user;
   const [readings, setReadings] = useState<Reading[]>(() => guestMode ? seed.map((item) => ({ ...item })) : []);
   const [periodConfigured, setPeriodConfigured] = useState(guestMode);
+  const [pastPeriods, setPastPeriods] = useState<{ start: string; end: string; rate: number }[]>([]);
   const [period, setPeriod] = useState(DEFAULT_PERIOD);
   const [rate, setRate] = useState(DEFAULT_RATE);
   const [periodForm, setPeriodForm] = useState(period);
@@ -153,12 +154,14 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
         readings: Array.isArray(data?.readings) ? data.readings as Reading[] : [],
         period: data?.period?.start && data?.period?.end ? data.period : DEFAULT_PERIOD,
         periodConfigured: data?.periodConfigured === true,
+        pastPeriods: Array.isArray(data?.pastPeriods) ? (data.pastPeriods as { start: string; end: string; rate: number }[]).filter((p) => p?.start && p?.end && Number(p.rate) > 0) : [],
         rate: Number(data?.rate) > 0 ? Number(data?.rate) : DEFAULT_RATE,
       };
       lastSavedPayload.current = JSON.stringify(payload);
       setReadings(payload.readings);
       setPeriod(payload.period);
       setPeriodConfigured(payload.periodConfigured);
+      setPastPeriods(payload.pastPeriods);
       setRate(payload.rate);
       if (first) {
         setPeriodForm(payload.period);
@@ -173,7 +176,7 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
 
   useEffect(() => {
     if (deletionObserved.current || !user || !user.emailVerified || !cloudReady || guestMode || auth.currentUser?.uid !== user.uid) return;
-    const payload = { readings, period, periodConfigured, rate };
+    const payload = { readings, period, periodConfigured, rate, pastPeriods };
     const serialized = JSON.stringify(payload);
     if (serialized === lastSavedPayload.current) return;
     lastSavedPayload.current = serialized;
@@ -181,7 +184,7 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
     setDoc(doc(db, "users", user.uid, "tracker", "state"), { ...payload, ownerUid: user.uid, updatedAt: Date.now() })
       .then(() => setSyncState("synced"))
       .catch(() => setSyncState("error"));
-  }, [readings, period, periodConfigured, rate, user, cloudReady, guestMode]);
+  }, [readings, period, periodConfigured, rate, pastPeriods, user, cloudReady, guestMode]);
 
   const computed = useMemo<ReadingWithUsage[]>(() => {
     const sorted = readings.filter((item) => item.date >= period.start && item.date <= period.end).sort((a, b) => `${a.date}T${a.time}`.localeCompare(`${b.date}T${b.time}`));
@@ -226,6 +229,11 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
   const totalPeriodDays = Math.max(1, Math.floor((periodEndDate.getTime() - periodStartDate.getTime()) / 86400000) + 1);
   const elapsedPeriodDays = Math.max(1, Math.floor((latestDate.getTime() - periodStartDate.getTime()) / 86400000) + 1);
   const progress = Math.min(100, elapsedPeriodDays / totalPeriodDays * 100);
+  const history = pastPeriods.map((p) => {
+    const rows = readings.filter((r) => r.date >= p.start && r.date <= p.end).sort((a, b) => `${a.date}T${a.time}`.localeCompare(`${b.date}T${b.time}`));
+    const used = rows.length > 1 ? Math.max(0, rows[rows.length - 1].reading - rows[0].reading) : 0;
+    return { ...p, used, cost: used * p.rate };
+  }).sort((a, b) => b.start.localeCompare(a.start));
   const selected = computed.find((item) => item.id === picked) || computed.at(-1);
   const periodExpired = todayISO() > period.end;
   const onboarding = !guestMode && (!periodConfigured || !readings.length);
@@ -238,6 +246,9 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
     event.preventDefault();
     const nextRate = Number(rateForm);
     if (!periodForm.start || !periodForm.end || periodForm.end < periodForm.start || !Number.isFinite(nextRate) || nextRate <= 0) return;
+    if (periodConfigured && (periodForm.start !== period.start || periodForm.end !== period.end) && readings.some((r) => r.date >= period.start && r.date <= period.end)) {
+      setPastPeriods((list) => [{ start: period.start, end: period.end, rate }, ...list.filter((p) => p.start !== period.start)]);
+    }
     setPeriod(periodForm); setRate(nextRate); setPeriodConfigured(true); setModal(null);
   };
   const askResetAccount = () => {
@@ -250,6 +261,7 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
     setPeriodForm(DEFAULT_PERIOD);
     setRate(DEFAULT_RATE);
     setRateForm(String(DEFAULT_RATE));
+    setPastPeriods([]);
     setPeriodConfigured(false);
     setModal("period");
   };
@@ -339,8 +351,7 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
     <header className="bar"><span className="wordmark"><span className="brand-mark"><Icon name="bolt" /></span>Meralpon</span><div className="bar-actions"><span className={`sync-pill ${guestMode ? "demo" : syncState}`}><span /> {guestMode ? "Sample" : syncState === "synced" ? "Saved" : syncState === "error" ? "Couldn’t save" : syncState === "offline" ? "Waiting for internet" : "Saving…"}</span><button className="account-button" onClick={() => setShowHelp(true)}>How it works</button>{user ? <><button className="account-button" onClick={() => signOut(auth)}>Sign out</button><button className="profile-pill" onClick={onProfile}><span>{(user.displayName || user.email || "U").slice(0, 1).toUpperCase()}</span>My account</button></> : <button className="account-button" onClick={onSignIn}>Sign in</button>}<button className="primary small" onClick={() => openAdd()}><Icon name="plus" /> Add reading</button></div></header>
     <h1 className="sr-only">Meralpon electricity tracker</h1>
     {guestMode && <div className="sample-strip"><p><b>You’re viewing sample data.</b> Change a reading and watch the estimate update. Nothing is saved.</p><button className="primary" onClick={onSignIn}>Create free account</button></div>}
-    {!guestMode && (!periodConfigured || periodExpired) && <section className="setup-notice"><div><strong>{periodExpired && periodConfigured ? "Ready for your next bill?" : "Start with your bill dates"}</strong><p>Choose your dates and price per kWh, then add your first meter reading.</p></div><button className="primary" onClick={openPeriod}>Set up my tracker</button></section>}
-    {!guestMode && !readings.length && periodConfigured && <section className="setup-notice"><div><strong>No readings yet</strong><p>Add the meter number from the first day of your bill. This is your starting point.</p></div><button className="primary" onClick={() => openAdd()}>Add first reading</button></section>}
+    {!guestMode && !onboarding && periodExpired && <section className="setup-notice"><div><strong>Ready for your next bill?</strong><p>Choose your new dates and price per kWh, then add your first meter reading.</p></div><button className="primary" onClick={openPeriod}>Set up my tracker</button></section>}
     {legal && <Legal type={legal} onClose={() => setLegal(null)} />}
     {showHelp && <Tutorial onClose={() => setShowHelp(false)} onDemo={() => setShowHelp(false)} />}
     {onboarding && <section className="panel welcome"><h2>Welcome to Meralpon</h2><p>Two quick steps, then you’ll see your estimated bill.</p><ol className="welcome-steps"><li className={step1done ? "done" : ""}><span className="step-dot">{step1done ? <Icon name="check" /> : "1"}</span><div><strong>Set your bill dates and price</strong><small>Copy them from your electricity bill.</small></div>{!step1done && <button className="primary" onClick={openPeriod}>Set up</button>}</li><li><span className="step-dot">2</span><div><strong>Add your first meter reading</strong><small>Type the number, or use a photo below.</small></div><button className={step1done ? "primary" : "account-button"} disabled={!step1done} onClick={() => openAdd()}>Add reading</button></li></ol></section>}
@@ -371,6 +382,9 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
       <div className="chart" role="group" aria-label="Usage at each reading. Select a bar for details.">{computed.map((item, index) => { const peak = Math.max(...computed.map((v) => v.usage), 1); return <button type="button" aria-pressed={selected?.id === item.id} onClick={() => setPicked(item.id)} className={`bar-col${selected?.id === item.id ? " latest" : ""}`} key={item.id}><span className="bar-value">{index === 0 ? "Start" : wholeNumber.format(item.usage)}</span><span className="bar-well"><i style={{ height: `${index === 0 ? 0 : Math.max(5, item.usage / peak * 100)}%` }} /></span><span className="bar-date">{shortDate(item.date)}</span></button>; })}</div>
     </section>
     <section className="panel ledger"><div className="ledger-head"><div><h2>Meter readings</h2><p>{computed.length} {guestMode ? "sample readings · changes are temporary" : "readings saved to this account"}</p></div><div className="ledger-actions"><button onClick={() => importRef.current?.click()}>Restore backup</button><input ref={importRef} hidden type="file" accept="application/json,.json" onChange={(e) => importJSON(e.target.files?.[0])}/><button onClick={() => exportFile("json")}><Icon name="download" /> Save backup</button><button onClick={() => exportFile("csv")}><Icon name="download" /> Spreadsheet</button></div></div><div className="table-wrap"><table><thead><tr><th>Date & time</th><th>Meter reading</th><th>Daily usage</th><th>Daily cost</th><th>Notes</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{[...computed].reverse().map((r) => <tr key={r.id}><td data-label="Date"><strong>{new Date(`${r.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}</strong><span>{r.time}</span></td><td data-label="Meter reading">{r.reading.toLocaleString("en-PH")} <small>kWh</small></td><td className="usage" data-label="Daily usage">{r.id === computed[0]?.id ? "—" : `+${number.format(r.usage)} kWh`}</td><td data-label="Daily cost">{r.id === computed[0]?.id ? "—" : money.format(r.cost)}</td><td className="notes" data-label="Notes">{r.notes || "—"}</td><td className="row-cell"><div className="row-actions"><button onClick={() => openEdit(r)} aria-label={`Edit reading from ${r.date}`}><Icon name="edit" /><span>Edit</span></button><button disabled={readings.length === 1} onClick={() => setConfirmation({ title: "Delete this reading?", detail: `The reading of ${r.reading.toLocaleString("en-PH")} kWh on ${r.date} will be removed. Your usage totals will update.`, action: "Delete reading", run: () => setReadings((list) => list.filter((x) => x.id !== r.id)) })} aria-label={`Delete reading from ${r.date}`}><Icon name="trash" /><span>Delete</span></button></div></td></tr>)}</tbody></table></div></section>
+    <section className="panel history"><div className="section-title"><div><h2>Past bills</h2><p className="sub">{history.length ? "Each finished billing period, saved when you start a new one." : "Finished billing periods will appear here after you start a new one."}</p></div></div>
+      {history.length > 0 && <ul className="history-list">{history.map((p, index) => { const older = history[index + 1]; const diff = older?.cost ? (p.cost - older.cost) / older.cost * 100 : null; return <li key={p.start}><div><strong>{shortDate(p.start)} – {shortDate(p.end)}</strong><small>{money.format(p.rate)}/kWh</small></div><div><strong>{money.format(p.cost)}</strong><small>{wholeNumber.format(p.used)} kWh used</small></div>{diff !== null && <span className={`change ${diff <= 0 ? "good" : "warn"}`}>{diff > 0 ? "+" : ""}{diff.toFixed(0)}% vs the bill before</span>}</li>; })}</ul>}
+    </section>
     </>}
     <footer>{guestMode ? "Sample dashboard · No account needed · Changes are temporary" : "Your readings are private to your account"}<br />Estimated at {money.format(rate)} per kWh. Your actual bill may include other charges.<div className="policy-links"><button onClick={() => setLegal("terms")}>Terms of use</button><button onClick={() => setLegal("privacy")}>Privacy notice</button></div></footer>
   </div>

@@ -92,3 +92,9 @@ button.bar-col:hover .bar-well{background:#17232f}button.bar-col:hover .bar-well
 button.bar-col.latest .bar-well i,button.bar-col.latest:hover .bar-well i{background:var(--accent)}
 button.bar-col[aria-pressed="true"]{background:#16222e}
 .bar-well{display:flex}
+/* Past bills. */
+.history{margin-bottom:28px}.history .sub{margin:6px 0 0;color:var(--muted);font-size:13px}
+.history-list{display:grid;gap:10px;margin:18px 0 0;padding:0;list-style:none}
+.history-list li{display:grid;grid-template-columns:1fr 1fr auto;align-items:center;gap:16px;border:1px solid var(--line);border-radius:14px;padding:14px 18px;background:#0f1822}
+.history-list strong{display:block;font-size:15px;font-variant-numeric:tabular-nums}.history-list small{display:block;margin-top:3px;color:var(--muted);font-size:12px}
+@media(max-width:640px){.history-list li{grid-template-columns:1fr 1fr}.history-list li .change{grid-column:1/-1}}
