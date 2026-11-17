@@ -77,3 +77,10 @@ body{font-feature-settings:"tnum" 0}
 .step-dot{display:grid;flex:none;width:34px;height:34px;place-items:center;border-radius:50%;background:#254136;color:var(--accent);font-size:14px;font-weight:700}.step-dot svg{width:18px}
 .welcome-steps div{flex:1;min-width:0}.welcome-steps strong{display:block;font-size:15px}.welcome-steps small{display:block;margin-top:3px;color:var(--muted);font-size:13px}
 @media(max-width:640px){.welcome{padding:22px}.welcome h2{font-size:24px}.welcome-steps li{flex-wrap:wrap}.welcome-steps li button{width:100%}}
+/* Easy-to-tap Edit and Delete buttons. */
+.row-actions{gap:8px}
+.row-actions button{display:inline-flex;align-items:center;gap:7px;width:auto;min-width:44px;height:44px;border:1px solid var(--line);border-radius:10px;padding:0 14px;color:#d3deea;background:#1a2634;font-size:13px;font-weight:600}
+.row-actions button:hover{border-color:var(--accent);color:#fff;background:#223246}
+.row-actions button:last-child:not(:disabled):hover{border-color:#a16770;background:#3a2128;color:#ffd1d7}
+.row-actions button:disabled{opacity:.35}
+@media(max-width:700px){.ledger .row-actions{justify-content:stretch}.ledger .row-actions button{flex:1;justify-content:center}}
