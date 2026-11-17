@@ -62,6 +62,7 @@ function Icon({ name, className = "" }: { name: string; className?: string }) {
     close: <path d="m6 6 12 12M18 6 6 18"/>,
     trend: <><path d="m4 16 5-5 4 4 7-8"/><path d="M15 7h5v5"/></>,
     chart: <path d="M5 19V13m5 6V9m5 10v-4m5 4V5"/>,
+    check: <path d="m5 12 5 5 9-10"/>,
   };
   return <svg aria-hidden="true" viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
@@ -221,6 +222,8 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
   const elapsedPeriodDays = Math.max(1, Math.floor((latestDate.getTime() - periodStartDate.getTime()) / 86400000) + 1);
   const progress = Math.min(100, elapsedPeriodDays / totalPeriodDays * 100);
   const periodExpired = todayISO() > period.end;
+  const onboarding = !guestMode && (!periodConfigured || !readings.length);
+  const step1done = periodConfigured && !periodExpired;
   const periodLabel = `${new Date(`${period.start}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric" })} – ${new Date(`${period.end}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}`;
 
   const shortDate = (date: string) => new Date(`${date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric" });
@@ -334,7 +337,8 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
     {!guestMode && !readings.length && periodConfigured && <section className="setup-notice"><div><strong>No readings yet</strong><p>Add the meter number from the first day of your bill. This is your starting point.</p></div><button className="primary" onClick={() => openAdd()}>Add first reading</button></section>}
     {legal && <Legal type={legal} onClose={() => setLegal(null)} />}
     {showHelp && <Tutorial onClose={() => setShowHelp(false)} onDemo={() => setShowHelp(false)} />}
-    <section className="hero" aria-label="Your electricity summary">
+    {onboarding && <section className="panel welcome"><h2>Welcome to Meralpon</h2><p>Two quick steps, then you’ll see your estimated bill.</p><ol className="welcome-steps"><li className={step1done ? "done" : ""}><span className="step-dot">{step1done ? <Icon name="check" /> : "1"}</span><div><strong>Set your bill dates and price</strong><small>Copy them from your electricity bill.</small></div>{!step1done && <button className="primary" onClick={openPeriod}>Set up</button>}</li><li><span className="step-dot">2</span><div><strong>Add your first meter reading</strong><small>Type the number, or use a photo below.</small></div><button className={step1done ? "primary" : "account-button"} disabled={!step1done} onClick={() => openAdd()}>Add reading</button></li></ol></section>}
+    {!onboarding && <section className="hero" aria-label="Your electricity summary">
       <div className="hero-main">
         <div className="hero-meta"><button className="chip" onClick={openPeriod}>{periodLabel}<b>Edit</b></button><button className="chip" onClick={openPeriod}>{money.format(rate)}/kWh<b>Edit</b></button></div>
         <h2 className="label">Estimated bill</h2>
@@ -348,16 +352,18 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
         <article className="stat"><h3 className="label">Latest usage</h3><p className="stat-figure">{wholeNumber.format(latest.usage)}<small> kWh</small></p><p className="stat-note">{money.format(latest.cost)} · <span className={`change ${change <= 0 ? "good" : "warn"}`}>{previous ? `${change > 0 ? "+" : ""}${change.toFixed(0)}% vs previous` : "First reading"}</span></p></article>
         <article className="stat"><h3 className="label">Tomorrow’s estimate</h3><p className="stat-figure">{wholeNumber.format(forecastTomorrow)}<small> kWh</small></p><p className="stat-note">{money.format(forecastTomorrow * rate)} · based on recent usage</p></article>
       </div>
-    </section>
+    </section>}
     <section className={`panel scan ${dragging ? "dragging" : ""}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLElement>) => { e.preventDefault(); setDragging(false); scan(e.dataTransfer.files[0]); }}>
       <input ref={fileRef} hidden type="file" accept="image/*" onClick={(event) => { event.currentTarget.value = ""; }} onChange={(e) => scan(e.target.files?.[0])} /><input ref={cameraRef} hidden type="file" accept="image/*" capture="environment" onClick={(event) => { event.currentTarget.value = ""; }} onChange={(e) => scan(e.target.files?.[0])} />
       <span className="camera"><Icon name="camera" /></span><div className="scan-copy"><h2>Read a meter photo</h2><p>Fill the frame with the meter digits, or drop a photo here. Check the number before saving.</p></div>
       <div className="capture-actions"><button type="button" className="outline-button camera-button" onClick={() => cameraRef.current?.click()}><Icon name="camera" /> Open camera</button><button type="button" className="outline-button" onClick={() => fileRef.current?.click()}><Icon name="upload" /> Choose image</button></div>
     </section>
+    {!onboarding && <>
     <section className="panel chart-panel"><div className="section-title"><div><h2>Daily usage</h2><p className="sub">Recent average: {wholeNumber.format(rollingAverage)} kWh a day</p></div></div>
       <div className="chart" role="list" aria-label="Usage at each reading">{computed.map((item, index) => { const peak = Math.max(...computed.map((v) => v.usage), 1); return <div role="listitem" className={`bar-col${index === computed.length - 1 ? " latest" : ""}`} key={item.id}><span className="bar-value">{index === 0 ? "Start" : wholeNumber.format(item.usage)}</span><div className="bar-well"><i style={{ height: `${index === 0 ? 0 : Math.max(5, item.usage / peak * 100)}%` }} /></div><span className="bar-date">{shortDate(item.date)}</span></div>; })}</div>
     </section>
     <section className="panel ledger"><div className="ledger-head"><div><h2>Meter readings</h2><p>{computed.length} {guestMode ? "sample readings · changes are temporary" : "readings saved to this account"}</p></div><div className="ledger-actions"><button onClick={() => importRef.current?.click()}>Restore backup</button><input ref={importRef} hidden type="file" accept="application/json,.json" onChange={(e) => importJSON(e.target.files?.[0])}/><button onClick={() => exportFile("json")}><Icon name="download" /> Save backup</button><button onClick={() => exportFile("csv")}><Icon name="download" /> Spreadsheet</button></div></div><div className="table-wrap"><table><thead><tr><th>Date & time</th><th>Meter reading</th><th>Daily usage</th><th>Daily cost</th><th>Notes</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{[...computed].reverse().map((r) => <tr key={r.id}><td data-label="Date"><strong>{new Date(`${r.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}</strong><span>{r.time}</span></td><td data-label="Meter reading">{r.reading.toLocaleString("en-PH")} <small>kWh</small></td><td className="usage" data-label="Daily usage">{r.id === computed[0]?.id ? "—" : `+${number.format(r.usage)} kWh`}</td><td data-label="Daily cost">{r.id === computed[0]?.id ? "—" : money.format(r.cost)}</td><td className="notes" data-label="Notes">{r.notes || "—"}</td><td className="row-cell"><div className="row-actions"><button onClick={() => openEdit(r)} aria-label="Edit reading"><Icon name="edit" /></button><button disabled={readings.length === 1} onClick={() => setConfirmation({ title: "Delete this reading?", detail: `The reading of ${r.reading.toLocaleString("en-PH")} kWh on ${r.date} will be removed. Your usage totals will update.`, action: "Delete reading", run: () => setReadings((list) => list.filter((x) => x.id !== r.id)) })} aria-label={`Delete reading from ${r.date}`}><Icon name="trash" /></button></div></td></tr>)}</tbody></table></div></section>
+    </>}
     <footer>{guestMode ? "Sample dashboard · No account needed · Changes are temporary" : "Your readings are private to your account"}<br />Estimated at {money.format(rate)} per kWh. Your actual bill may include other charges.<div className="policy-links"><button onClick={() => setLegal("terms")}>Terms of use</button><button onClick={() => setLegal("privacy")}>Privacy notice</button></div></footer>
   </div>
   {(modal === "add" || modal === "edit") && <Modal title={modal === "edit" ? "Edit reading" : "Add a reading"} onClose={() => setModal(null)}><ReadingForm error={formError} form={form} setForm={setForm} submit={submit} label={modal === "edit" ? "Save changes" : "Add to log"} /></Modal>}

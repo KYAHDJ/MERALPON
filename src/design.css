@@ -69,3 +69,11 @@ body{font-feature-settings:"tnum" 0}
 .tour-visual{min-height:120px;margin-bottom:20px;border:1px solid var(--line);border-radius:16px;background:radial-gradient(100% 120% at 0 0,#1a3a33,transparent 65%),#0f1822;color:var(--accent)}
 .tour-visual strong{font-size:clamp(26px,7vw,36px);font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .tour-slide h3{margin:0 0 8px}.tour-slide>p{margin:0}
+/* First-run welcome for new accounts. */
+.welcome{margin-bottom:20px;padding:32px}.welcome h2{margin:0;font-size:28px;font-weight:700;letter-spacing:-.03em}.welcome>p{margin:8px 0 24px;color:var(--muted);font-size:15px}
+.welcome-steps{display:grid;gap:12px;margin:0;padding:0;list-style:none}
+.welcome-steps li{display:flex;align-items:center;gap:16px;border:1px solid var(--line);border-radius:14px;padding:16px 18px;background:#0f1822}
+.welcome-steps li.done{border-color:#2f5646;background:#14281f}
+.step-dot{display:grid;flex:none;width:34px;height:34px;place-items:center;border-radius:50%;background:#254136;color:var(--accent);font-size:14px;font-weight:700}.step-dot svg{width:18px}
+.welcome-steps div{flex:1;min-width:0}.welcome-steps strong{display:block;font-size:15px}.welcome-steps small{display:block;margin-top:3px;color:var(--muted);font-size:13px}
+@media(max-width:640px){.welcome{padding:22px}.welcome h2{font-size:24px}.welcome-steps li{flex-wrap:wrap}.welcome-steps li button{width:100%}}
