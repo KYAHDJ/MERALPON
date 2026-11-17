@@ -124,6 +124,7 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
   const [oldRecords, setOldRecords] = useState<any>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [formError, setFormError] = useState("");
+  const [picked, setPicked] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [confirmation, setConfirmation] = useState<{ title: string; detail: string; action: string; run: () => void } | null>(null);
   useEffect(() => {
@@ -197,6 +198,10 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
     return { ...item, dailyRate: hours > 4 ? item.usage / hours * 24 : item.usage };
   }).filter((item) => item.dailyRate > 0).slice(-10);
   const rollingAverage = normalizedDaily.length ? normalizedDaily.reduce((sum, item) => sum + item.dailyRate, 0) / normalizedDaily.length : 0;
+  const lastDaily = normalizedDaily.at(-1);
+  const priorDaily = normalizedDaily.slice(0, -1);
+  const priorAverage = priorDaily.length ? priorDaily.reduce((sum, item) => sum + item.dailyRate, 0) / priorDaily.length : 0;
+  const spike = lastDaily && lastDaily.id === computed.at(-1)?.id && priorDaily.length >= 2 && lastDaily.dailyRate >= priorAverage * 1.5 && lastDaily.dailyRate - priorAverage >= 1 ? { now: lastDaily.dailyRate, average: priorAverage } : null;
   const forecastTomorrow = useMemo(() => {
     if (!normalizedDaily.length) return 0;
     const values = normalizedDaily.map((item) => item.dailyRate);
@@ -221,6 +226,7 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
   const totalPeriodDays = Math.max(1, Math.floor((periodEndDate.getTime() - periodStartDate.getTime()) / 86400000) + 1);
   const elapsedPeriodDays = Math.max(1, Math.floor((latestDate.getTime() - periodStartDate.getTime()) / 86400000) + 1);
   const progress = Math.min(100, elapsedPeriodDays / totalPeriodDays * 100);
+  const selected = computed.find((item) => item.id === picked) || computed.at(-1);
   const periodExpired = todayISO() > period.end;
   const onboarding = !guestMode && (!periodConfigured || !readings.length);
   const step1done = periodConfigured && !periodExpired;
@@ -338,6 +344,7 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
     {legal && <Legal type={legal} onClose={() => setLegal(null)} />}
     {showHelp && <Tutorial onClose={() => setShowHelp(false)} onDemo={() => setShowHelp(false)} />}
     {onboarding && <section className="panel welcome"><h2>Welcome to Meralpon</h2><p>Two quick steps, then you’ll see your estimated bill.</p><ol className="welcome-steps"><li className={step1done ? "done" : ""}><span className="step-dot">{step1done ? <Icon name="check" /> : "1"}</span><div><strong>Set your bill dates and price</strong><small>Copy them from your electricity bill.</small></div>{!step1done && <button className="primary" onClick={openPeriod}>Set up</button>}</li><li><span className="step-dot">2</span><div><strong>Add your first meter reading</strong><small>Type the number, or use a photo below.</small></div><button className={step1done ? "primary" : "account-button"} disabled={!step1done} onClick={() => openAdd()}>Add reading</button></li></ol></section>}
+    {!onboarding && spike && <div className="spike" role="status"><b>Higher than usual.</b> Your latest reading works out to about {number.format(spike.now)} kWh a day, compared with {number.format(spike.average)} kWh before. Worth checking for appliances left on.</div>}
     {!onboarding && <section className="hero" aria-label="Your electricity summary">
       <div className="hero-main">
         <div className="hero-meta"><button className="chip" onClick={openPeriod}>{periodLabel}<b>Edit</b></button><button className="chip" onClick={openPeriod}>{money.format(rate)}/kWh<b>Edit</b></button></div>
@@ -360,7 +367,8 @@ function Tracker({ user, onSignIn, onProfile }: { user: User | null; onSignIn: (
     </section>
     {!onboarding && <>
     <section className="panel chart-panel"><div className="section-title"><div><h2>Daily usage</h2><p className="sub">Recent average: {wholeNumber.format(rollingAverage)} kWh a day</p></div></div>
-      <div className="chart" role="list" aria-label="Usage at each reading">{computed.map((item, index) => { const peak = Math.max(...computed.map((v) => v.usage), 1); return <div role="listitem" className={`bar-col${index === computed.length - 1 ? " latest" : ""}`} key={item.id}><span className="bar-value">{index === 0 ? "Start" : wholeNumber.format(item.usage)}</span><div className="bar-well"><i style={{ height: `${index === 0 ? 0 : Math.max(5, item.usage / peak * 100)}%` }} /></div><span className="bar-date">{shortDate(item.date)}</span></div>; })}</div>
+      {selected && <p className="chart-detail" aria-live="polite"><strong>{new Date(`${selected.date}T12:00:00`).toLocaleDateString("en-PH", { month: "long", day: "numeric" })} · {selected.time}</strong><span>{selected.id === computed[0]?.id ? `Starting reading · ${selected.reading.toLocaleString("en-PH")} kWh` : `${number.format(selected.usage)} kWh used · ${money.format(selected.cost)} · meter ${selected.reading.toLocaleString("en-PH")}`}</span></p>}
+      <div className="chart" role="group" aria-label="Usage at each reading. Select a bar for details.">{computed.map((item, index) => { const peak = Math.max(...computed.map((v) => v.usage), 1); return <button type="button" aria-pressed={selected?.id === item.id} onClick={() => setPicked(item.id)} className={`bar-col${selected?.id === item.id ? " latest" : ""}`} key={item.id}><span className="bar-value">{index === 0 ? "Start" : wholeNumber.format(item.usage)}</span><span className="bar-well"><i style={{ height: `${index === 0 ? 0 : Math.max(5, item.usage / peak * 100)}%` }} /></span><span className="bar-date">{shortDate(item.date)}</span></button>; })}</div>
     </section>
     <section className="panel ledger"><div className="ledger-head"><div><h2>Meter readings</h2><p>{computed.length} {guestMode ? "sample readings · changes are temporary" : "readings saved to this account"}</p></div><div className="ledger-actions"><button onClick={() => importRef.current?.click()}>Restore backup</button><input ref={importRef} hidden type="file" accept="application/json,.json" onChange={(e) => importJSON(e.target.files?.[0])}/><button onClick={() => exportFile("json")}><Icon name="download" /> Save backup</button><button onClick={() => exportFile("csv")}><Icon name="download" /> Spreadsheet</button></div></div><div className="table-wrap"><table><thead><tr><th>Date & time</th><th>Meter reading</th><th>Daily usage</th><th>Daily cost</th><th>Notes</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{[...computed].reverse().map((r) => <tr key={r.id}><td data-label="Date"><strong>{new Date(`${r.date}T12:00:00`).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}</strong><span>{r.time}</span></td><td data-label="Meter reading">{r.reading.toLocaleString("en-PH")} <small>kWh</small></td><td className="usage" data-label="Daily usage">{r.id === computed[0]?.id ? "—" : `+${number.format(r.usage)} kWh`}</td><td data-label="Daily cost">{r.id === computed[0]?.id ? "—" : money.format(r.cost)}</td><td className="notes" data-label="Notes">{r.notes || "—"}</td><td className="row-cell"><div className="row-actions"><button onClick={() => openEdit(r)} aria-label={`Edit reading from ${r.date}`}><Icon name="edit" /><span>Edit</span></button><button disabled={readings.length === 1} onClick={() => setConfirmation({ title: "Delete this reading?", detail: `The reading of ${r.reading.toLocaleString("en-PH")} kWh on ${r.date} will be removed. Your usage totals will update.`, action: "Delete reading", run: () => setReadings((list) => list.filter((x) => x.id !== r.id)) })} aria-label={`Delete reading from ${r.date}`}><Icon name="trash" /><span>Delete</span></button></div></td></tr>)}</tbody></table></div></section>
     </>}

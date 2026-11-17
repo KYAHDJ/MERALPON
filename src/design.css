@@ -84,3 +84,11 @@ body{font-feature-settings:"tnum" 0}
 .row-actions button:last-child:not(:disabled):hover{border-color:#a16770;background:#3a2128;color:#ffd1d7}
 .row-actions button:disabled{opacity:.35}
 @media(max-width:700px){.ledger .row-actions{justify-content:stretch}.ledger .row-actions button{flex:1;justify-content:center}}
+/* Spike notice and tappable chart bars. */
+.spike{margin:0 0 20px;border:1px solid #6b5a2e;border-radius:14px;padding:14px 18px;color:#f1dfae;background:#2a2412;font-size:14px;line-height:1.6}.spike b{color:#ffe9a8}
+.chart-detail{display:flex;flex-wrap:wrap;gap:4px 14px;margin:0 0 16px;border-radius:12px;padding:12px 14px;background:#0f1822;font-size:14px}.chart-detail strong{font-weight:700}.chart-detail span{color:var(--muted)}
+button.bar-col{border:0;border-radius:12px;padding:6px 4px;background:transparent;color:inherit;font:inherit;cursor:pointer}
+button.bar-col:hover .bar-well{background:#17232f}button.bar-col:hover .bar-well i{background:#5f9a87}
+button.bar-col.latest .bar-well i,button.bar-col.latest:hover .bar-well i{background:var(--accent)}
+button.bar-col[aria-pressed="true"]{background:#16222e}
+.bar-well{display:flex}
