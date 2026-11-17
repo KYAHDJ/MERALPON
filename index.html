@@ -4,15 +4,33 @@
     <!-- figma:head-start -->
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#080d14" />
-    <meta name="description" content="A private, browser-based Meralco electricity meter and cost tracker." />
+    <meta name="theme-color" content="#0d131c" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="Meralpon turns your electricity meter readings into a clear view of usage and your estimated bill." />
+    <meta property="og:title" content="Meralpon · Electricity tracker" />
+    <meta property="og:description" content="Log meter readings, see daily usage, and estimate your next bill." />
+    <meta property="og:type" content="website" />
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230b111a'/%3E%3Cpath d='M18 3 7 18h8l-1 11 11-16h-8l1-10Z' fill='%2300d6ff'/%3E%3C/svg%3E" />
-    <title>Meralco kWh Tracker</title>
+    <title>Meralpon · Electricity tracker</title>
+    <style>
+      /* Boot screen: paints before JavaScript so the first load is never blank. React reuses these classes. */
+      html,body{margin:0;background:#0d131c}
+      .boot{display:flex;flex-direction:column;align-items:center;gap:18px;color:#a1afc1;font:500 14px/1.4 Inter,"Segoe UI",system-ui,sans-serif}
+      .boot-mark{display:grid;width:48px;height:48px;place-items:center;border-radius:14px;color:#88e4c4;background:#254136;animation:boot-pulse 1.6s ease-in-out infinite}
+      .boot-mark svg{width:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+      .boot-bar{width:132px;height:3px;overflow:hidden;border-radius:3px;background:#2c3a4a}
+      .boot-bar i{display:block;width:40%;height:100%;border-radius:3px;background:#88e4c4;animation:boot-slide 1.3s cubic-bezier(.65,0,.35,1) infinite}
+      .boot-shell{display:grid;min-height:100vh;min-height:100dvh;place-items:center}
+      @keyframes boot-slide{from{transform:translateX(-100%)}to{transform:translateX(330%)}}
+      @keyframes boot-pulse{50%{opacity:.6}}
+      @media(prefers-reduced-motion:reduce){.boot-mark,.boot-bar i{animation:none}}
+    </style>
     <!-- figma:head-end -->
   </head>
   <body>
     <!-- figma:body-start -->
-    <div id="root"></div>
+    <div id="root"><main class="boot-shell" role="status" aria-live="polite"><div class="boot"><span class="boot-mark"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m13 2-9 12h7l-1 8 9-12h-7l1-8Z"/></svg></span><span>Opening Meralpon…</span><div class="boot-bar"><i></i></div></div></main></div>
+    <noscript>Meralpon needs JavaScript to run. Please turn it on in your browser and reload.</noscript>
     <script type="module" src="/src/main.tsx"></script>
     <!-- figma:body-end -->
   </body>
