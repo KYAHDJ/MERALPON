@@ -49,22 +49,21 @@ export function Legal({ type, onClose }: { type: "terms" | "privacy"; onClose: (
 }
 
 const steps = [
-  { title: "Make sense of your next bill", text: "Start with the dates on your electricity bill and your price per kWh. You can change both using Manage beside the bill dates.", tag: "01 / Your bill", illustration: "dates", tip: "kWh is the unit your meter uses to measure electricity." },
-  { title: "Start with the meter number", text: "Add your first reading as the starting point. Each new reading is compared with the one before it to find how much electricity you used.", tag: "02 / Your readings", illustration: "reading", tip: "Example: 8,873 − 8,869 = 4 kWh used." },
-  { title: "Take a photo or type it in", text: "Use Open camera or Choose image. Keep the digits sharp and close, then check the suggested number before saving. You can always type the number yourself.", tag: "03 / Your photo", illustration: "photo", tip: "Avoid reflections, shadows, and angled photos." },
-  { title: "See what your bill could be", text: "The circle shows your latest meter number, an estimated final reading, and estimated cost. The ring follows the days in your billing period.", tag: "04 / Your estimate", illustration: "estimate", tip: "Estimates become more useful as you add regular readings." },
-  { title: "Your readings, wherever you are", text: "Use the same confirmed account on another device. Save a backup from Meter readings, and manage your profile or delete your account in My account.", tag: "05 / Your account", illustration: "account", tip: "The sample dashboard is separate from every real account." },
+  { title: "Set your bill dates", text: "Enter the dates and the price per kWh from your electricity bill.", visual: "29 SEP → 28 OCT" },
+  { title: "Add your meter reading", text: "Type the number, or take a photo of your meter. Each reading is compared with the last one to find your usage.", visual: "0 8 8 7 3" },
+  { title: "Watch your estimated bill", text: "Your estimate updates with every reading. Create an account to keep it saved on all your devices.", visual: "₱1,201" },
 ];
 export function GuidedTour({ onClose }: { onClose: () => void }) {
   const [step, setStep] = useState(0);
   const current = steps[step];
-  return <Dialog title="A quick look around" onClose={onClose}>
-    <div className="tour-progress" aria-label={"Step " + (step + 1) + " of " + steps.length}>{steps.map((item, index) => <button key={item.tag} aria-label={"Go to step " + (index + 1)} aria-current={index === step ? "step" : undefined} className={index <= step ? "complete" : ""} onClick={() => setStep(index)} />)}</div>
+  const last = step === steps.length - 1;
+  return <Dialog title="How it works" onClose={onClose}>
+    <div className="tour-progress" aria-label={"Step " + (step + 1) + " of " + steps.length}>{steps.map((item, index) => <button key={item.title} aria-label={"Go to step " + (index + 1)} aria-current={index === step ? "step" : undefined} className={index <= step ? "complete" : ""} onClick={() => setStep(index)} />)}</div>
     <div className="tour-slide" key={step}>
-      <div className={"tour-visual " + current.illustration} aria-hidden="true">{step === 0 ? <><span>YOUR BILL DATES</span><strong>29 SEP <i>→</i> 28 OCT</strong><small>A clear start. A clear finish.</small></> : step === 1 ? <><span>METER READING</span><strong className="meter-digits">0 8 8 7 3</strong><small>+4 kWh since your last reading</small></> : step === 2 ? <><span className="focus-frame">0 8 8 7 3</span><small>Point · Capture · Check</small></> : step === 3 ? <><div className="tour-ring">₱<small>Your estimate</small></div></> : <><span className="tour-avatar">You</span><small>One account. All your devices.</small></>}</div>
-      <p className="kicker">{current.tag}</p><h3>{current.title}</h3><p>{current.text}</p><div className="tour-tip">{current.tip}</div>
+      <div className="tour-visual" aria-hidden="true"><strong>{current.visual}</strong></div>
+      <h3>{current.title}</h3><p>{current.text}</p>
     </div>
-    <div className="tour-controls"><button className="account-button" onClick={() => step ? setStep(step - 1) : onClose()}>{step ? "Back" : "Skip for now"}</button><button className="primary" onClick={() => step === steps.length - 1 ? onClose() : setStep(step + 1)}>{step === steps.length - 1 ? "Ready to explore" : "Next step →"}</button></div>
+    <div className="tour-controls"><button className="account-button" onClick={() => step ? setStep(step - 1) : onClose()}>{step ? "Back" : "Skip"}</button><button className="primary" onClick={() => last ? onClose() : setStep(step + 1)}>{last ? "Got it" : "Next"}</button></div>
   </Dialog>;
 }
 
