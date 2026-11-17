@@ -20,6 +20,7 @@ export default defineConfig(({ mode }) => {
     build: {
       sourcemap: emitSourcemaps ? 'inline' : false,
       minify: !emitSourcemaps,
+      rolldownOptions: { output: { codeSplitting: { groups: [{ name: 'firebase', test: /node_modules[\/](@firebase|firebase)[\/]/ }] } } },
     },
     plugins: [
 react(),
